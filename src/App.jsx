@@ -55,7 +55,12 @@ export default function App() {
       try {
         // 1) Fetch data
         log(`Fetching data for ${params.ticker}...`);
-        const stock = await fetchStockData(params.ticker, params.startDate, params.endDate);
+        if (params.apiKey) {
+          log("Using Alpha Vantage (CORS-enabled).");
+        } else {
+          log("No API key — trying Yahoo Finance via CORS proxies (may fail)...", "info");
+        }
+        const stock = await fetchStockData(params.ticker, params.startDate, params.endDate, params.apiKey);
         log(`Got ${stock.prices.length} trading days.`, "success");
 
         if (stock.prices.length < params.lookback + FORECAST_HORIZON + 50) {

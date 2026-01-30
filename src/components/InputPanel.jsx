@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 
 const DEFAULT_TICKERS = ["AAPL", "MSFT", "SPY", "NVDA", "TSM", "JNJ"];
 const MODEL_OPTIONS = [
@@ -6,6 +6,8 @@ const MODEL_OPTIONS = [
   { key: "gbm", label: "GBM (Geometric Brownian Motion)" },
   { key: "decision_tree", label: "Decision Tree" },
 ];
+
+const AV_KEY_STORAGE = "stock_forecast_av_key";
 
 function fiveYearsAgo() {
   const d = new Date();
@@ -25,6 +27,23 @@ export default function InputPanel({ onRun, loading, progress }) {
   const [models, setModels] = useState(["lstm", "gbm", "decision_tree"]);
   const [ensemble, setEnsemble] = useState(true);
   const [gbmPaths, setGbmPaths] = useState(5000);
+  const [apiKey, setApiKey] = useState("");
+
+  // Load saved API key from localStorage on mount
+  useEffect(() => {
+    const saved = localStorage.getItem(AV_KEY_STORAGE);
+    if (saved) setApiKey(saved);
+  }, []);
+
+  // Persist API key to localStorage
+  const handleApiKeyChange = (val) => {
+    setApiKey(val);
+    if (val.trim()) {
+      localStorage.setItem(AV_KEY_STORAGE, val.trim());
+    } else {
+      localStorage.removeItem(AV_KEY_STORAGE);
+    }
+  };
 
   const toggleModel = (key) =>
     setModels((prev) =>
@@ -42,12 +61,42 @@ export default function InputPanel({ onRun, loading, progress }) {
       models,
       ensemble,
       gbmPaths,
+      apiKey: apiKey.trim() || null,
     });
   };
 
   return (
     <div className="card">
       <h3>Configuration</h3>
+
+      <label>
+        Alpha Vantage API Key
+        <span style={{ fontSize: "0.75rem", color: "var(--text-secondary)", marginLeft: 6 }}>
+          (free at{" "}
+          <a
+            href="https://www.alphavantage.co/support/#api-key"
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ color: "var(--accent)" }}
+          >
+            alphavantage.co
+          </a>
+          )
+        </span>
+      </label>
+      <input
+        type="text"
+        placeholder="Paste your free API key here"
+        value={apiKey}
+        onChange={(e) => handleApiKeyChange(e.target.value)}
+        style={!apiKey.trim() ? { borderColor: "var(--warning)" } : {}}
+      />
+      {!apiKey.trim() && (
+        <p style={{ fontSize: "0.75rem", color: "var(--warning)", marginTop: 4 }}>
+          Without an API key, data fetching may fail on hosted sites.
+          Get a free key in seconds — no credit card required.
+        </p>
+      )}
 
       <label>Ticker (preset)</label>
       <select value={ticker} onChange={(e) => { setTicker(e.target.value); setCustomTicker(""); }}>

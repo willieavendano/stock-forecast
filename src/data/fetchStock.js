@@ -1,250 +1,244 @@
 /**
  * Client-side stock data fetcher.
  *
- * On GitHub Pages we need a CORS proxy because Yahoo's API doesn't
- * send Access-Control-Allow-Origin headers.
+ * Data source priority:
+ *   1. Alpha Vantage (CORS-enabled, works directly from browser)
+ *      — requires a free API key from alphavantage.co
+ *   2. Yahoo Finance via CORS proxies (fallback, unreliable)
+ *   3. Direct Yahoo fetch (localhost only)
  *
- * Strategy (tried in order):
- *   1. Yahoo v8 chart JSON API via each CORS proxy
- *   2. Yahoo v7 CSV download API via each CORS proxy (different
- *      endpoint — some proxies handle one better than the other)
- *   3. Direct fetch (works on localhost)
- *
- * Every response is validated as the expected format before parsing
- * so proxy error pages (HTML / plain-text) are caught gracefully.
+ * Alpha Vantage free tier: 25 requests/day. Results are cached per
+ * session so repeated fetches for the same ticker don't consume quota.
  */
 
-const PROXY_STRATEGIES = [
-  {
-    name: "corsproxy.io",
-    buildUrl: (target) =>
-      `https://corsproxy.io/?url=${encodeURIComponent(target)}`,
-  },
-  {
-    name: "allorigins",
-    buildUrl: (target) =>
-      `https://api.allorigins.win/get?url=${encodeURIComponent(target)}`,
-    envelope: true, // response wrapped in { contents: "..." }
-  },
-  {
-    name: "codetabs",
-    buildUrl: (target) =>
-      `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(target)}`,
-  },
-  {
-    name: "corsproxy.org",
-    buildUrl: (target) =>
-      `https://corsproxy.org/?url=${encodeURIComponent(target)}`,
-  },
-];
+// ─── session cache ───────────────────────────────────────
 
-// Session cache
 const _cache = {};
 function cacheKey(ticker, start, end) {
   return `${ticker}_${start}_${end}`;
 }
 
-// ─── helpers ──────────────────────────────────────────────
+// ─── Alpha Vantage (primary) ─────────────────────────────
 
-/** Read the body as text. Never throws. */
-async function bodyText(resp) {
-  try {
-    return await resp.text();
-  } catch {
-    return "";
+async function fetchAlphaVantage(ticker, startDate, endDate, apiKey) {
+  const url =
+    `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY_ADJUSTED` +
+    `&symbol=${encodeURIComponent(ticker)}&outputsize=full&apikey=${apiKey}`;
+
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`Alpha Vantage HTTP ${resp.status}`);
+
+  const data = await resp.json();
+
+  // Check for AV error messages
+  if (data["Error Message"]) {
+    throw new Error(`Alpha Vantage: ${data["Error Message"]}`);
   }
+  if (data["Note"]) {
+    // Rate limit message
+    throw new Error(`Alpha Vantage rate limit: ${data["Note"]}`);
+  }
+  if (data["Information"]) {
+    throw new Error(`Alpha Vantage: ${data["Information"]}`);
+  }
+
+  const timeSeries = data["Time Series (Daily)"];
+  if (!timeSeries) {
+    throw new Error(`Alpha Vantage returned no time series for "${ticker}".`);
+  }
+
+  // AV returns all history, we need to filter to [startDate, endDate]
+  const allDates = Object.keys(timeSeries).sort(); // ascending
+  const dates = [], prices = [], volumes = [], highs = [], lows = [], opens = [];
+
+  for (const d of allDates) {
+    if (d < startDate || d > endDate) continue;
+    const row = timeSeries[d];
+    const adjClose = parseFloat(row["5. adjusted close"]);
+    const close = parseFloat(row["4. close"]);
+    const p = isNaN(adjClose) ? close : adjClose;
+    if (isNaN(p)) continue;
+
+    dates.push(d);
+    prices.push(p);
+    volumes.push(parseInt(row["6. volume"], 10) || 0);
+    highs.push(parseFloat(row["2. high"]) || p);
+    lows.push(parseFloat(row["3. low"]) || p);
+    opens.push(parseFloat(row["1. open"]) || p);
+  }
+
+  if (prices.length === 0) {
+    throw new Error(`No Alpha Vantage data for "${ticker}" in range ${startDate} to ${endDate}.`);
+  }
+
+  return { dates, prices, volumes, highs, lows, opens };
 }
 
-/** Try to parse text as JSON. Returns null on failure. */
+// ─── Yahoo Finance via CORS proxies (fallback) ──────────
+
+const PROXIES = [
+  {
+    name: "corsproxy.io",
+    buildUrl: (t) => `https://corsproxy.io/?url=${encodeURIComponent(t)}`,
+  },
+  {
+    name: "allorigins",
+    buildUrl: (t) => `https://api.allorigins.win/get?url=${encodeURIComponent(t)}`,
+    envelope: true,
+  },
+  {
+    name: "codetabs",
+    buildUrl: (t) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(t)}`,
+  },
+  {
+    name: "corsproxy.org",
+    buildUrl: (t) => `https://corsproxy.org/?url=${encodeURIComponent(t)}`,
+  },
+];
+
 function tryParseJson(text) {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return null;
-  }
+  try { return JSON.parse(text); } catch { return null; }
 }
 
-/** Unwrap allorigins envelope if needed. */
-function unwrapEnvelope(text) {
-  const json = tryParseJson(text);
-  if (json && typeof json.contents === "string") {
-    return json.contents;
-  }
-  return text; // not an envelope — return raw
+async function bodyText(resp) {
+  try { return await resp.text(); } catch { return ""; }
 }
 
-// ─── main export ──────────────────────────────────────────
+function unwrap(text) {
+  const j = tryParseJson(text);
+  return j && typeof j.contents === "string" ? j.contents : text;
+}
 
-export async function fetchStockData(ticker, startDate, endDate) {
-  const key = cacheKey(ticker, startDate, endDate);
-  if (_cache[key]) return _cache[key];
+async function fetchYahooViaProxies(ticker, startDate, endDate) {
+  const p1 = Math.floor(new Date(startDate).getTime() / 1000);
+  const p2 = Math.floor(new Date(endDate).getTime() / 1000);
 
-  const period1 = Math.floor(new Date(startDate).getTime() / 1000);
-  const period2 = Math.floor(new Date(endDate).getTime() / 1000);
-
-  const v8Url =
-    `https://query1.finance.yahoo.com/v8/finance/chart/` +
-    `${encodeURIComponent(ticker)}` +
-    `?period1=${period1}&period2=${period2}&interval=1d&includeAdjustedClose=true`;
-
-  const v7Url =
-    `https://query1.finance.yahoo.com/v7/finance/download/` +
-    `${encodeURIComponent(ticker)}` +
-    `?period1=${period1}&period2=${period2}&interval=1d&events=history` +
-    `&includeAdjustedClose=true`;
+  const v8 =
+    `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}` +
+    `?period1=${p1}&period2=${p2}&interval=1d&includeAdjustedClose=true`;
+  const v7 =
+    `https://query1.finance.yahoo.com/v7/finance/download/${encodeURIComponent(ticker)}` +
+    `?period1=${p1}&period2=${p2}&interval=1d&events=history&includeAdjustedClose=true`;
 
   const errors = [];
 
-  // ── Round 1: Try v8 JSON via each proxy ─────────────────
-  for (const proxy of PROXY_STRATEGIES) {
+  // Try v8 JSON
+  for (const proxy of PROXIES) {
     try {
-      const url = proxy.buildUrl(v8Url);
-      const resp = await fetch(url);
-      if (!resp.ok) {
-        errors.push(`${proxy.name} v8: HTTP ${resp.status}`);
-        continue;
-      }
-
+      const resp = await fetch(proxy.buildUrl(v8));
+      if (!resp.ok) { errors.push(`${proxy.name} v8: HTTP ${resp.status}`); continue; }
       let text = await bodyText(resp);
-      if (proxy.envelope) text = unwrapEnvelope(text);
-
+      if (proxy.envelope) text = unwrap(text);
       const json = tryParseJson(text);
-      if (!json || !json.chart) {
-        errors.push(`${proxy.name} v8: response is not Yahoo JSON`);
-        continue;
-      }
-
-      if (json.chart.error) {
-        const e = json.chart.error;
-        errors.push(`${proxy.name} v8: Yahoo error — ${e.description || e.code}`);
-        continue;
-      }
-
-      const result = parseYahooChart(json, ticker);
-      _cache[key] = result;
-      return result;
-    } catch (e) {
-      errors.push(`${proxy.name} v8: ${e.message}`);
-    }
+      if (!json?.chart?.result?.[0]) { errors.push(`${proxy.name} v8: not Yahoo JSON`); continue; }
+      if (json.chart.error) { errors.push(`${proxy.name} v8: ${json.chart.error.description}`); continue; }
+      return parseYahooChart(json, ticker);
+    } catch (e) { errors.push(`${proxy.name} v8: ${e.message}`); }
   }
 
-  // ── Round 2: Try v7 CSV via each proxy ──────────────────
-  for (const proxy of PROXY_STRATEGIES) {
+  // Try v7 CSV
+  for (const proxy of PROXIES) {
     try {
-      const url = proxy.buildUrl(v7Url);
-      const resp = await fetch(url);
-      if (!resp.ok) {
-        errors.push(`${proxy.name} v7: HTTP ${resp.status}`);
-        continue;
-      }
-
+      const resp = await fetch(proxy.buildUrl(v7));
+      if (!resp.ok) { errors.push(`${proxy.name} v7: HTTP ${resp.status}`); continue; }
       let text = await bodyText(resp);
-      if (proxy.envelope) text = unwrapEnvelope(text);
-
-      // CSV starts with "Date,"
-      if (!text.trimStart().startsWith("Date")) {
-        errors.push(`${proxy.name} v7: response is not CSV`);
-        continue;
-      }
-
-      const result = parseYahooCsv(text, ticker);
-      _cache[key] = result;
-      return result;
-    } catch (e) {
-      errors.push(`${proxy.name} v7: ${e.message}`);
-    }
+      if (proxy.envelope) text = unwrap(text);
+      if (!text.trimStart().startsWith("Date")) { errors.push(`${proxy.name} v7: not CSV`); continue; }
+      return parseYahooCsv(text, ticker);
+    } catch (e) { errors.push(`${proxy.name} v7: ${e.message}`); }
   }
 
-  // ── Round 3: Direct fetch (localhost / CORS-disabled) ───
-  for (const targetUrl of [v8Url, v7Url]) {
+  // Direct (localhost)
+  for (const url of [v8, v7]) {
     try {
-      const resp = await fetch(targetUrl);
+      const resp = await fetch(url);
       if (!resp.ok) continue;
       const text = await bodyText(resp);
-
       const json = tryParseJson(text);
-      if (json?.chart?.result?.[0]) {
-        const result = parseYahooChart(json, ticker);
-        _cache[key] = result;
-        return result;
-      }
-      if (text.trimStart().startsWith("Date")) {
-        const result = parseYahooCsv(text, ticker);
-        _cache[key] = result;
-        return result;
-      }
-    } catch {
-      // CORS blocked — expected
-    }
+      if (json?.chart?.result?.[0]) return parseYahooChart(json, ticker);
+      if (text.trimStart().startsWith("Date")) return parseYahooCsv(text, ticker);
+    } catch { /* CORS */ }
   }
 
   throw new Error(
-    `Failed to fetch data for "${ticker}". ` +
-      `Tried ${errors.length} sources:\n` +
-      errors.map((e) => `  - ${e}`).join("\n")
+    `Yahoo fallback failed for "${ticker}". ${errors.length} attempts:\n` +
+    errors.map((e) => `  - ${e}`).join("\n")
   );
 }
 
-// ─── parsers ──────────────────────────────────────────────
+// ─── parsers ─────────────────────────────────────────────
 
 function parseYahooChart(json, ticker) {
-  const chart = json?.chart?.result?.[0];
-  if (!chart) throw new Error(`No data for "${ticker}".`);
-
-  const timestamps = chart.timestamp;
-  const quotes = chart.indicators?.quote?.[0] || {};
-  const adjCloseArr = chart.indicators?.adjclose?.[0]?.adjclose;
-  const closeArr = quotes.close;
-
-  if (!timestamps || !closeArr) {
-    throw new Error(`Incomplete data for "${ticker}".`);
-  }
+  const chart = json.chart.result[0];
+  const ts = chart.timestamp;
+  const q = chart.indicators?.quote?.[0] || {};
+  const adj = chart.indicators?.adjclose?.[0]?.adjclose;
+  if (!ts || !q.close) throw new Error(`Incomplete Yahoo data for "${ticker}".`);
 
   const dates = [], prices = [], volumes = [], highs = [], lows = [], opens = [];
-
-  for (let i = 0; i < timestamps.length; i++) {
-    const p = adjCloseArr?.[i] ?? closeArr[i];
+  for (let i = 0; i < ts.length; i++) {
+    const p = adj?.[i] ?? q.close[i];
     if (p == null) continue;
-    dates.push(new Date(timestamps[i] * 1000).toISOString().split("T")[0]);
+    dates.push(new Date(ts[i] * 1000).toISOString().split("T")[0]);
     prices.push(p);
-    volumes.push(quotes.volume?.[i] ?? 0);
-    highs.push(quotes.high?.[i] ?? p);
-    lows.push(quotes.low?.[i] ?? p);
-    opens.push(quotes.open?.[i] ?? p);
+    volumes.push(q.volume?.[i] ?? 0);
+    highs.push(q.high?.[i] ?? p);
+    lows.push(q.low?.[i] ?? p);
+    opens.push(q.open?.[i] ?? p);
   }
-
-  if (prices.length === 0) throw new Error(`No price rows for "${ticker}".`);
+  if (!prices.length) throw new Error(`No price rows for "${ticker}".`);
   return { dates, prices, volumes, highs, lows, opens };
 }
 
-function parseYahooCsv(csvText, ticker) {
-  const lines = csvText.trim().split("\n");
+function parseYahooCsv(csv, ticker) {
+  const lines = csv.trim().split("\n");
   if (lines.length < 2) throw new Error(`Empty CSV for "${ticker}".`);
-
   const hdr = lines[0].split(",").map((h) => h.trim());
-  const col = (name) => hdr.indexOf(name);
-  const dateIdx = col("Date");
-  const priceIdx = col("Adj Close") >= 0 ? col("Adj Close") : col("Close");
-  const closeIdx = col("Close");
-
-  if (dateIdx < 0 || priceIdx < 0) {
-    throw new Error(`Unexpected CSV columns for "${ticker}": ${hdr.join(",")}`);
-  }
+  const ci = (n) => hdr.indexOf(n);
+  const dateI = ci("Date");
+  const priceI = ci("Adj Close") >= 0 ? ci("Adj Close") : ci("Close");
+  if (dateI < 0 || priceI < 0) throw new Error(`Bad CSV columns for "${ticker}".`);
 
   const dates = [], prices = [], volumes = [], highs = [], lows = [], opens = [];
-
   for (let i = 1; i < lines.length; i++) {
     const c = lines[i].split(",");
-    const p = parseFloat(c[priceIdx]);
-    if (isNaN(p) || !c[dateIdx] || c[dateIdx] === "null") continue;
-    dates.push(c[dateIdx]);
+    const p = parseFloat(c[priceI]);
+    if (isNaN(p) || !c[dateI] || c[dateI] === "null") continue;
+    dates.push(c[dateI]);
     prices.push(p);
-    volumes.push(parseInt(c[col("Volume")], 10) || 0);
-    highs.push(parseFloat(c[col("High")]) || p);
-    lows.push(parseFloat(c[col("Low")]) || p);
-    opens.push(parseFloat(c[col("Open")]) || p);
+    volumes.push(parseInt(c[ci("Volume")], 10) || 0);
+    highs.push(parseFloat(c[ci("High")]) || p);
+    lows.push(parseFloat(c[ci("Low")]) || p);
+    opens.push(parseFloat(c[ci("Open")]) || p);
+  }
+  if (!prices.length) throw new Error(`No valid CSV rows for "${ticker}".`);
+  return { dates, prices, volumes, highs, lows, opens };
+}
+
+// ─── main export ─────────────────────────────────────────
+
+/**
+ * Fetch stock data. Uses Alpha Vantage if apiKey is provided,
+ * falls back to Yahoo via CORS proxies.
+ */
+export async function fetchStockData(ticker, startDate, endDate, apiKey) {
+  const key = cacheKey(ticker, startDate, endDate);
+  if (_cache[key]) return _cache[key];
+
+  // Strategy 1: Alpha Vantage (reliable, CORS-enabled)
+  if (apiKey) {
+    try {
+      const result = await fetchAlphaVantage(ticker, startDate, endDate, apiKey);
+      _cache[key] = result;
+      return result;
+    } catch (avErr) {
+      // If AV fails (rate limit, bad key), fall through to Yahoo
+      console.warn("Alpha Vantage failed, trying Yahoo fallback:", avErr.message);
+    }
   }
 
-  if (prices.length === 0) throw new Error(`No valid CSV rows for "${ticker}".`);
-  return { dates, prices, volumes, highs, lows, opens };
+  // Strategy 2: Yahoo Finance via CORS proxies
+  const result = await fetchYahooViaProxies(ticker, startDate, endDate);
+  _cache[key] = result;
+  return result;
 }
