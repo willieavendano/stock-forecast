@@ -58,7 +58,7 @@ export default function App() {
         if (params.apiKey) {
           log("Using Alpha Vantage (CORS-enabled).");
         } else {
-          log("No API key — trying Yahoo Finance via CORS proxies (may fail)...", "info");
+          log("No API key — trying Stooq via CORS proxies (may fail)...", "info");
         }
         const stock = await fetchStockData(params.ticker, params.startDate, params.endDate, params.apiKey);
         log(`Got ${stock.prices.length} trading days.`, "success");

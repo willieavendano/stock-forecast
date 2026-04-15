@@ -74,12 +74,20 @@ async function fetchAlphaVantage(ticker, startDate, endDate, apiKey) {
   return { dates, prices, volumes, highs, lows, opens };
 }
 
-// ─── Yahoo Finance via CORS proxies (fallback) ──────────
+// ─── Stooq via CORS proxies (free no-key fallback) ───────
+//
+// Yahoo Finance locked down their public API; Stooq returns a plain CSV
+// with no auth requirement and works reliably through CORS proxies.
+// URL: https://stooq.com/q/d/l/?s=AAPL.US&d1=YYYYMMDD&d2=YYYYMMDD&i=d
 
 const PROXIES = [
   {
     name: "corsproxy.io",
     buildUrl: (t) => `https://corsproxy.io/?url=${encodeURIComponent(t)}`,
+  },
+  {
+    name: "allorigins-raw",
+    buildUrl: (t) => `https://api.allorigins.win/raw?url=${encodeURIComponent(t)}`,
   },
   {
     name: "allorigins",
@@ -109,109 +117,87 @@ function unwrap(text) {
   return j && typeof j.contents === "string" ? j.contents : text;
 }
 
-async function fetchYahooViaProxies(ticker, startDate, endDate) {
-  const p1 = Math.floor(new Date(startDate).getTime() / 1000);
-  const p2 = Math.floor(new Date(endDate).getTime() / 1000);
+function fetchWithTimeout(url, ms = 8000) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  return fetch(url, { signal: ctrl.signal }).finally(() => clearTimeout(timer));
+}
 
-  const v8 =
-    `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}` +
-    `?period1=${p1}&period2=${p2}&interval=1d&includeAdjustedClose=true`;
-  const v7 =
-    `https://query1.finance.yahoo.com/v7/finance/download/${encodeURIComponent(ticker)}` +
-    `?period1=${p1}&period2=${p2}&interval=1d&events=history&includeAdjustedClose=true`;
+async function fetchStooqViaProxies(ticker, startDate, endDate) {
+  const d1 = startDate.replace(/-/g, "");
+  const d2 = endDate.replace(/-/g, "");
+  const stooqUrl =
+    `https://stooq.com/q/d/l/?s=${encodeURIComponent(ticker.toLowerCase())}.us` +
+    `&d1=${d1}&d2=${d2}&i=d`;
 
   const errors = [];
 
-  // Try v8 JSON
   for (const proxy of PROXIES) {
     try {
-      const resp = await fetch(proxy.buildUrl(v8));
-      if (!resp.ok) { errors.push(`${proxy.name} v8: HTTP ${resp.status}`); continue; }
+      const resp = await fetchWithTimeout(proxy.buildUrl(stooqUrl));
+      if (!resp.ok) { errors.push(`${proxy.name}: HTTP ${resp.status}`); continue; }
       let text = await bodyText(resp);
       if (proxy.envelope) text = unwrap(text);
-      const json = tryParseJson(text);
-      if (!json?.chart?.result?.[0]) { errors.push(`${proxy.name} v8: not Yahoo JSON`); continue; }
-      if (json.chart.error) { errors.push(`${proxy.name} v8: ${json.chart.error.description}`); continue; }
-      return parseYahooChart(json, ticker);
-    } catch (e) { errors.push(`${proxy.name} v8: ${e.message}`); }
+      if (!text.trimStart().startsWith("Date")) {
+        errors.push(`${proxy.name}: unexpected response (${text.slice(0, 60)})`);
+        continue;
+      }
+      return parseStooqCsv(text, ticker);
+    } catch (e) {
+      errors.push(`${proxy.name}: ${e.message}`);
+    }
   }
 
-  // Try v7 CSV
-  for (const proxy of PROXIES) {
-    try {
-      const resp = await fetch(proxy.buildUrl(v7));
-      if (!resp.ok) { errors.push(`${proxy.name} v7: HTTP ${resp.status}`); continue; }
-      let text = await bodyText(resp);
-      if (proxy.envelope) text = unwrap(text);
-      if (!text.trimStart().startsWith("Date")) { errors.push(`${proxy.name} v7: not CSV`); continue; }
-      return parseYahooCsv(text, ticker);
-    } catch (e) { errors.push(`${proxy.name} v7: ${e.message}`); }
-  }
-
-  // Direct (localhost)
-  for (const url of [v8, v7]) {
-    try {
-      const resp = await fetch(url);
-      if (!resp.ok) continue;
+  // Direct fetch — succeeds on localhost, blocked by CORS in production
+  try {
+    const resp = await fetchWithTimeout(stooqUrl);
+    if (resp.ok) {
       const text = await bodyText(resp);
-      const json = tryParseJson(text);
-      if (json?.chart?.result?.[0]) return parseYahooChart(json, ticker);
-      if (text.trimStart().startsWith("Date")) return parseYahooCsv(text, ticker);
-    } catch { /* CORS */ }
-  }
+      if (text.trimStart().startsWith("Date")) return parseStooqCsv(text, ticker);
+    }
+  } catch { /* expected CORS block in production */ }
 
   throw new Error(
-    `Yahoo fallback failed for "${ticker}". ${errors.length} attempts:\n` +
+    `Stooq fallback failed for "${ticker}". ${errors.length} attempts:\n` +
     errors.map((e) => `  - ${e}`).join("\n")
   );
 }
 
 // ─── parsers ─────────────────────────────────────────────
 
-function parseYahooChart(json, ticker) {
-  const chart = json.chart.result[0];
-  const ts = chart.timestamp;
-  const q = chart.indicators?.quote?.[0] || {};
-  const adj = chart.indicators?.adjclose?.[0]?.adjclose;
-  if (!ts || !q.close) throw new Error(`Incomplete Yahoo data for "${ticker}".`);
-
-  const dates = [], prices = [], volumes = [], highs = [], lows = [], opens = [];
-  for (let i = 0; i < ts.length; i++) {
-    const p = adj?.[i] ?? q.close[i];
-    if (p == null) continue;
-    dates.push(new Date(ts[i] * 1000).toISOString().split("T")[0]);
-    prices.push(p);
-    volumes.push(q.volume?.[i] ?? 0);
-    highs.push(q.high?.[i] ?? p);
-    lows.push(q.low?.[i] ?? p);
-    opens.push(q.open?.[i] ?? p);
-  }
-  if (!prices.length) throw new Error(`No price rows for "${ticker}".`);
-  return { dates, prices, volumes, highs, lows, opens };
-}
-
-function parseYahooCsv(csv, ticker) {
+function parseStooqCsv(csv, ticker) {
   const lines = csv.trim().split("\n");
-  if (lines.length < 2) throw new Error(`Empty CSV for "${ticker}".`);
-  const hdr = lines[0].split(",").map((h) => h.trim());
+  if (lines.length < 2) throw new Error(`Empty Stooq CSV for "${ticker}".`);
+
+  const hdr = lines[0].split(",").map((h) => h.trim().toLowerCase());
   const ci = (n) => hdr.indexOf(n);
-  const dateI = ci("Date");
-  const priceI = ci("Adj Close") >= 0 ? ci("Adj Close") : ci("Close");
-  if (dateI < 0 || priceI < 0) throw new Error(`Bad CSV columns for "${ticker}".`);
+  const dateI = ci("date"), closeI = ci("close");
+  const openI = ci("open"), highI = ci("high"), lowI = ci("low"), volI = ci("volume");
+
+  if (dateI < 0 || closeI < 0)
+    throw new Error(`Unexpected Stooq columns for "${ticker}": ${hdr.join(",")}`);
 
   const dates = [], prices = [], volumes = [], highs = [], lows = [], opens = [];
   for (let i = 1; i < lines.length; i++) {
     const c = lines[i].split(",");
-    const p = parseFloat(c[priceI]);
-    if (isNaN(p) || !c[dateI] || c[dateI] === "null") continue;
-    dates.push(c[dateI]);
+    const p = parseFloat(c[closeI]);
+    if (isNaN(p) || !c[dateI]) continue;
+    dates.push(c[dateI].trim());
     prices.push(p);
-    volumes.push(parseInt(c[ci("Volume")], 10) || 0);
-    highs.push(parseFloat(c[ci("High")]) || p);
-    lows.push(parseFloat(c[ci("Low")]) || p);
-    opens.push(parseFloat(c[ci("Open")]) || p);
+    volumes.push(volI >= 0 ? (parseInt(c[volI], 10) || 0) : 0);
+    highs.push(highI >= 0 ? (parseFloat(c[highI]) || p) : p);
+    lows.push(lowI >= 0 ? (parseFloat(c[lowI]) || p) : p);
+    opens.push(openI >= 0 ? (parseFloat(c[openI]) || p) : p);
   }
-  if (!prices.length) throw new Error(`No valid CSV rows for "${ticker}".`);
+
+  if (!prices.length) throw new Error(`No valid rows in Stooq CSV for "${ticker}".`);
+
+  // Stooq returns newest-first — reverse to ascending chronological order
+  if (dates.length > 1 && dates[0] > dates[dates.length - 1]) {
+    dates.reverse(); prices.reverse(); volumes.reverse();
+    highs.reverse(); lows.reverse(); opens.reverse();
+  }
+
   return { dates, prices, volumes, highs, lows, opens };
 }
 
@@ -237,8 +223,8 @@ export async function fetchStockData(ticker, startDate, endDate, apiKey) {
     }
   }
 
-  // Strategy 2: Yahoo Finance via CORS proxies
-  const result = await fetchYahooViaProxies(ticker, startDate, endDate);
+  // Strategy 2: Stooq via CORS proxies (free, no API key)
+  const result = await fetchStooqViaProxies(ticker, startDate, endDate);
   _cache[key] = result;
   return result;
 }
