@@ -76,12 +76,13 @@ async function fetchAlphaVantage(ticker, startDate, endDate, apiKey) {
 
 // ─── Free fallback (no API key) ──────────────────────────
 //
-// Races three approaches in parallel — first success wins:
-//   1. Yahoo Finance chart API direct (query1 + query2 servers)
-//      Yahoo's chart endpoint sometimes carries Access-Control-Allow-Origin: *
-//      for widget embeds, making it the fastest no-key path when it works.
-//   2. Stooq plain-CSV direct (succeeds on localhost without CORS issues)
-//   3. Stooq via public CORS proxies (last resort for deployed/production use)
+// Races four approaches in parallel — first success wins:
+//   1. Yahoo Finance chart API direct (query1 + query2) — works when Yahoo
+//      serves Access-Control-Allow-Origin: * (browser/region dependent)
+//   2. NASDAQ public API direct — api.nasdaq.com is the backend for nasdaq.com
+//      itself, so it sometimes allows broad CORS origins
+//   3. Yahoo Finance v8 JSON via CORS proxies — proxies return JSON we can parse
+//   4. Stooq CSV direct — succeeds on localhost, blocked in production
 
 const PROXIES = [
   {
@@ -176,7 +177,43 @@ function parseStooqCsv(csv, ticker) {
   }
   if (!prices.length) throw new Error(`No valid rows in Stooq CSV for "${ticker}".`);
 
-  // Stooq returns newest-first — reverse to ascending chronological order
+  if (dates.length > 1 && dates[0] > dates[dates.length - 1]) {
+    dates.reverse(); prices.reverse(); volumes.reverse();
+    highs.reverse(); lows.reverse(); opens.reverse();
+  }
+  return { dates, prices, volumes, highs, lows, opens };
+}
+
+function parseNasdaqJson(json, ticker) {
+  const rows = json?.data?.tradesTable?.rows;
+  if (!rows?.length) throw new Error(`No NASDAQ rows for "${ticker}".`);
+
+  const clean = (s) => parseFloat((s ?? "").replace(/[$,]/g, ""));
+  const cleanVol = (s) => parseInt((s ?? "").replace(/,/g, ""), 10) || 0;
+
+  // MM/DD/YYYY → YYYY-MM-DD
+  const fmtDate = (s) => {
+    const p = (s ?? "").split("/");
+    return p.length === 3
+      ? `${p[2]}-${p[0].padStart(2, "0")}-${p[1].padStart(2, "0")}`
+      : null;
+  };
+
+  const dates = [], prices = [], volumes = [], highs = [], lows = [], opens = [];
+  for (const row of rows) {
+    const date = fmtDate(row.date);
+    const p = clean(row.close);
+    if (!date || isNaN(p)) continue;
+    dates.push(date);
+    prices.push(p);
+    volumes.push(cleanVol(row.volume));
+    highs.push(clean(row.high) || p);
+    lows.push(clean(row.low) || p);
+    opens.push(clean(row.open) || p);
+  }
+  if (!prices.length) throw new Error(`No valid NASDAQ rows for "${ticker}".`);
+
+  // NASDAQ returns newest-first
   if (dates.length > 1 && dates[0] > dates[dates.length - 1]) {
     dates.reverse(); prices.reverse(); volumes.reverse();
     highs.reverse(); lows.reverse(); opens.reverse();
@@ -192,18 +229,18 @@ async function fetchFallback(ticker, startDate, endDate) {
   const d1 = startDate.replace(/-/g, "");
   const d2 = endDate.replace(/-/g, "");
 
-  const yahooBase =
-    `?period1=${p1}&period2=${p2}&interval=1d&includeAdjustedClose=true`;
-  const yahooQ1 =
-    `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}${yahooBase}`;
-  const yahooQ2 =
-    `https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}${yahooBase}`;
+  const yahooParams = `?period1=${p1}&period2=${p2}&interval=1d&includeAdjustedClose=true`;
+  const yahooQ1 = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}${yahooParams}`;
+  const yahooQ2 = `https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}${yahooParams}`;
+  const nasdaqUrl =
+    `https://api.nasdaq.com/api/quote/${encodeURIComponent(ticker)}/historical` +
+    `?assetclass=stocks&fromdate=${startDate}&todate=${endDate}&limit=9999&type=1`;
   const stooqUrl =
     `https://stooq.com/q/d/l/?s=${encodeURIComponent(ticker.toLowerCase())}.us` +
     `&d1=${d1}&d2=${d2}&i=d`;
 
-  // Helper: attempt a Yahoo direct fetch
-  const tryYahoo = async (url, label) => {
+  // Attempt Yahoo Finance direct
+  const tryYahooDirect = async (url, label) => {
     const resp = await fetchWithTimeout(url, 10000);
     if (!resp.ok) throw new Error(`${label}: HTTP ${resp.status}`);
     const json = tryParseJson(await bodyText(resp));
@@ -212,29 +249,42 @@ async function fetchFallback(ticker, startDate, endDate) {
     return parseYahooChart(json, ticker);
   };
 
-  // Helper: attempt Stooq through a CORS proxy
-  const tryProxy = async (proxy) => {
-    const resp = await fetchWithTimeout(proxy.buildUrl(stooqUrl));
-    if (!resp.ok) throw new Error(`${proxy.name}: HTTP ${resp.status}`);
+  // Attempt Yahoo Finance v8 JSON through a CORS proxy
+  const tryYahooViaProxy = async (proxy) => {
+    const resp = await fetchWithTimeout(proxy.buildUrl(yahooQ1));
+    if (!resp.ok) throw new Error(`${proxy.name}/yahoo: HTTP ${resp.status}`);
     let text = await bodyText(resp);
     if (proxy.envelope) text = unwrap(text);
-    if (!text.trimStart().startsWith("Date"))
-      throw new Error(`${proxy.name}: not CSV`);
+    const json = tryParseJson(text);
+    if (!json?.chart?.result?.[0]) throw new Error(`${proxy.name}/yahoo: not chart JSON`);
+    if (json.chart.error) throw new Error(`${proxy.name}/yahoo: ${json.chart.error.description}`);
+    return parseYahooChart(json, ticker);
+  };
+
+  // Attempt NASDAQ public API direct
+  const tryNasdaq = async () => {
+    const resp = await fetchWithTimeout(nasdaqUrl, 10000);
+    if (!resp.ok) throw new Error(`nasdaq: HTTP ${resp.status}`);
+    const json = tryParseJson(await bodyText(resp));
+    return parseNasdaqJson(json, ticker);
+  };
+
+  // Attempt Stooq CSV direct (succeeds on localhost)
+  const tryStooqDirect = async () => {
+    const resp = await fetchWithTimeout(stooqUrl, 8000);
+    if (!resp.ok) throw new Error(`stooq-direct: HTTP ${resp.status}`);
+    const text = await bodyText(resp);
+    if (!text.trimStart().startsWith("Date")) throw new Error("stooq-direct: not CSV");
     return parseStooqCsv(text, ticker);
   };
 
   // Race everything in parallel — first success wins
   const attempts = [
-    tryYahoo(yahooQ1, "yahoo-q1"),
-    tryYahoo(yahooQ2, "yahoo-q2"),
-    // Stooq direct (works on localhost without CORS issues)
-    fetchWithTimeout(stooqUrl, 8000).then(async (resp) => {
-      if (!resp.ok) throw new Error(`stooq-direct: HTTP ${resp.status}`);
-      const text = await bodyText(resp);
-      if (!text.trimStart().startsWith("Date")) throw new Error("stooq-direct: not CSV");
-      return parseStooqCsv(text, ticker);
-    }),
-    ...PROXIES.map(tryProxy),
+    tryYahooDirect(yahooQ1, "yahoo-q1"),
+    tryYahooDirect(yahooQ2, "yahoo-q2"),
+    tryNasdaq(),
+    tryStooqDirect(),
+    ...PROXIES.map(tryYahooViaProxy),
   ];
 
   try {
@@ -243,9 +293,9 @@ async function fetchFallback(ticker, startDate, endDate) {
     const details = (agg.errors ?? []).map((e) => `  • ${e.message}`).join("\n");
     throw new Error(
       `All data sources failed for "${ticker}".\n\n` +
-      `To fix this, enter a free Alpha Vantage API key in the API Key field.\n` +
-      `Get one in 60 seconds at: https://www.alphavantage.co/support/#api-key\n\n` +
-      `Attempted sources:\n${details}`
+      `Fix: enter a free Alpha Vantage API key in the API Key field above.\n` +
+      `Get one in 60 seconds (no credit card): alphavantage.co/support/#api-key\n\n` +
+      `Attempted:\n${details}`
     );
   }
 }
