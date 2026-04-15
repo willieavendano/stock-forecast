@@ -12,7 +12,7 @@ import {
   forecastDecisionTree,
   evaluateDecisionTree,
 } from "./models/decisionTree";
-import { ensembleForecasts } from "./models/ensemble";
+import { ensembleForecasts, evaluateEnsemble } from "./models/ensemble";
 
 const FORECAST_HORIZON = 30;
 
@@ -75,6 +75,7 @@ export default function App() {
         log(`Split — train: ${split.train.length}, val: ${split.val.length}, test: ${split.test.length}`);
 
         const metricsResult = {};
+        const evalResults = {};
         const forecasts = {};
         const bands = {};
         const allPrices = stock.prices;
@@ -95,7 +96,8 @@ export default function App() {
           log(`LSTM trained — ${history.loss.length} epochs.`, "success");
 
           const lstmMetrics = await evaluateLSTM(model, scaler, split.test, split.val, params.lookback);
-          metricsResult.lstm = lstmMetrics;
+          metricsResult.lstm = { MAE: lstmMetrics.MAE, RMSE: lstmMetrics.RMSE, MAPE: lstmMetrics.MAPE };
+          evalResults.lstm = { preds: lstmMetrics.preds, actuals: lstmMetrics.actuals };
           log(`LSTM test — MAE: ${lstmMetrics.MAE}, RMSE: ${lstmMetrics.RMSE}, MAPE: ${lstmMetrics.MAPE}%`);
 
           const lstmFc = await forecastLSTM(model, scaler, allPrices, params.lookback, FORECAST_HORIZON);
@@ -111,7 +113,8 @@ export default function App() {
 
           log(`Simulating ${params.gbmPaths.toLocaleString()} Monte Carlo paths...`);
           const gbmMetrics = evaluateGBM(gbmParams, split.test, split.val[split.val.length - 1]);
-          metricsResult.gbm = gbmMetrics;
+          metricsResult.gbm = { MAE: gbmMetrics.MAE, RMSE: gbmMetrics.RMSE, MAPE: gbmMetrics.MAPE };
+          evalResults.gbm = { preds: gbmMetrics.preds, actuals: gbmMetrics.actuals };
           log(`GBM test — MAE: ${gbmMetrics.MAE}, RMSE: ${gbmMetrics.RMSE}, MAPE: ${gbmMetrics.MAPE}%`);
 
           const gbmFc = forecastGBM(
@@ -139,7 +142,8 @@ export default function App() {
           log(`DT best params: depth=${bestParams.maxDepth}, split=${bestParams.minSamplesSplit}, leaf=${bestParams.minSamplesLeaf}`, "success");
 
           const dtMetrics = evaluateDecisionTree(tree, split.test, splitV.test);
-          metricsResult.decision_tree = dtMetrics;
+          metricsResult.decision_tree = { MAE: dtMetrics.MAE, RMSE: dtMetrics.RMSE, MAPE: dtMetrics.MAPE };
+          evalResults.decision_tree = { preds: dtMetrics.preds, actuals: dtMetrics.actuals };
           log(`DT test — MAE: ${dtMetrics.MAE}, RMSE: ${dtMetrics.RMSE}, MAPE: ${dtMetrics.MAPE}%`);
 
           const dtFc = forecastDecisionTree(tree, allPrices, allVolumes, FORECAST_HORIZON);
@@ -153,6 +157,12 @@ export default function App() {
           const ens = ensembleForecasts(forecasts, Object.keys(bands).length > 0 ? bands : null);
           forecasts.ensemble = ens.point;
           bands.ensemble = { lower5: ens.lower5, upper95: ens.upper95 };
+
+          if (Object.keys(evalResults).length >= 2) {
+            const ensMetrics = evaluateEnsemble(evalResults);
+            metricsResult.ensemble = ensMetrics;
+            log(`Ensemble test — MAE: ${ensMetrics.MAE}, RMSE: ${ensMetrics.RMSE}, MAPE: ${ensMetrics.MAPE}%`);
+          }
           log("Ensemble forecast generated.", "success");
         }
 

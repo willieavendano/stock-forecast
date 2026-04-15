@@ -134,5 +134,7 @@ export function evaluateGBM(params, testPrices, contextLastPrice) {
     MAE: +(maeSum / n).toFixed(4),
     RMSE: +Math.sqrt(mseSum / n).toFixed(4),
     MAPE: +((mapeSum / n) * 100).toFixed(4),
+    preds,
+    actuals: [...testPrices],
   };
 }

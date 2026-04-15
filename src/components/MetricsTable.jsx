@@ -4,6 +4,7 @@ const LABELS = {
   lstm: "LSTM",
   gbm: "GBM (Geometric Brownian Motion)",
   decision_tree: "Decision Tree",
+  ensemble: "Ensemble",
 };
 
 export default function MetricsTable({ metrics }) {
