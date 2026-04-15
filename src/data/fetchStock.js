@@ -117,10 +117,19 @@ function unwrap(text) {
   return j && typeof j.contents === "string" ? j.contents : text;
 }
 
-function fetchWithTimeout(url, ms = 8000) {
+function fetchWithTimeout(url, ms = 15000) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), ms);
   return fetch(url, { signal: ctrl.signal }).finally(() => clearTimeout(timer));
+}
+
+async function attemptProxy(proxy, targetUrl) {
+  const resp = await fetchWithTimeout(proxy.buildUrl(targetUrl));
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  let text = await bodyText(resp);
+  if (proxy.envelope) text = unwrap(text);
+  if (!text.trimStart().startsWith("Date")) throw new Error(`not CSV`);
+  return text;
 }
 
 async function fetchStooqViaProxies(ticker, startDate, endDate) {
@@ -130,37 +139,30 @@ async function fetchStooqViaProxies(ticker, startDate, endDate) {
     `https://stooq.com/q/d/l/?s=${encodeURIComponent(ticker.toLowerCase())}.us` +
     `&d1=${d1}&d2=${d2}&i=d`;
 
-  const errors = [];
+  // Fire all proxies + a direct attempt in parallel — first success wins.
+  const attempts = [
+    ...PROXIES.map((proxy) =>
+      attemptProxy(proxy, stooqUrl).then((text) => ({ text, src: proxy.name }))
+    ),
+    // Direct fetch works on localhost; CORS-blocked in production but costs nothing to try
+    fetchWithTimeout(stooqUrl, 5000)
+      .then(async (resp) => {
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const text = await bodyText(resp);
+        if (!text.trimStart().startsWith("Date")) throw new Error("not CSV");
+        return { text, src: "direct" };
+      }),
+  ];
 
-  for (const proxy of PROXIES) {
-    try {
-      const resp = await fetchWithTimeout(proxy.buildUrl(stooqUrl));
-      if (!resp.ok) { errors.push(`${proxy.name}: HTTP ${resp.status}`); continue; }
-      let text = await bodyText(resp);
-      if (proxy.envelope) text = unwrap(text);
-      if (!text.trimStart().startsWith("Date")) {
-        errors.push(`${proxy.name}: unexpected response (${text.slice(0, 60)})`);
-        continue;
-      }
-      return parseStooqCsv(text, ticker);
-    } catch (e) {
-      errors.push(`${proxy.name}: ${e.message}`);
-    }
+  let result;
+  try {
+    result = await Promise.any(attempts);
+  } catch (agg) {
+    const msgs = (agg.errors ?? []).map((e) => `  - ${e.message}`).join("\n");
+    throw new Error(`Stooq fallback failed for "${ticker}":\n${msgs}`);
   }
 
-  // Direct fetch — succeeds on localhost, blocked by CORS in production
-  try {
-    const resp = await fetchWithTimeout(stooqUrl);
-    if (resp.ok) {
-      const text = await bodyText(resp);
-      if (text.trimStart().startsWith("Date")) return parseStooqCsv(text, ticker);
-    }
-  } catch { /* expected CORS block in production */ }
-
-  throw new Error(
-    `Stooq fallback failed for "${ticker}". ${errors.length} attempts:\n` +
-    errors.map((e) => `  - ${e}`).join("\n")
-  );
+  return parseStooqCsv(result.text, ticker);
 }
 
 // ─── parsers ─────────────────────────────────────────────
