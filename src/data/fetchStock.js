@@ -74,11 +74,14 @@ async function fetchAlphaVantage(ticker, startDate, endDate, apiKey) {
   return { dates, prices, volumes, highs, lows, opens };
 }
 
-// ─── Stooq via CORS proxies (free no-key fallback) ───────
+// ─── Free fallback (no API key) ──────────────────────────
 //
-// Yahoo Finance locked down their public API; Stooq returns a plain CSV
-// with no auth requirement and works reliably through CORS proxies.
-// URL: https://stooq.com/q/d/l/?s=AAPL.US&d1=YYYYMMDD&d2=YYYYMMDD&i=d
+// Races three approaches in parallel — first success wins:
+//   1. Yahoo Finance chart API direct (query1 + query2 servers)
+//      Yahoo's chart endpoint sometimes carries Access-Control-Allow-Origin: *
+//      for widget embeds, making it the fastest no-key path when it works.
+//   2. Stooq plain-CSV direct (succeeds on localhost without CORS issues)
+//   3. Stooq via public CORS proxies (last resort for deployed/production use)
 
 const PROXIES = [
   {
@@ -123,49 +126,29 @@ function fetchWithTimeout(url, ms = 15000) {
   return fetch(url, { signal: ctrl.signal }).finally(() => clearTimeout(timer));
 }
 
-async function attemptProxy(proxy, targetUrl) {
-  const resp = await fetchWithTimeout(proxy.buildUrl(targetUrl));
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  let text = await bodyText(resp);
-  if (proxy.envelope) text = unwrap(text);
-  if (!text.trimStart().startsWith("Date")) throw new Error(`not CSV`);
-  return text;
-}
-
-async function fetchStooqViaProxies(ticker, startDate, endDate) {
-  const d1 = startDate.replace(/-/g, "");
-  const d2 = endDate.replace(/-/g, "");
-  const stooqUrl =
-    `https://stooq.com/q/d/l/?s=${encodeURIComponent(ticker.toLowerCase())}.us` +
-    `&d1=${d1}&d2=${d2}&i=d`;
-
-  // Fire all proxies + a direct attempt in parallel — first success wins.
-  const attempts = [
-    ...PROXIES.map((proxy) =>
-      attemptProxy(proxy, stooqUrl).then((text) => ({ text, src: proxy.name }))
-    ),
-    // Direct fetch works on localhost; CORS-blocked in production but costs nothing to try
-    fetchWithTimeout(stooqUrl, 5000)
-      .then(async (resp) => {
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const text = await bodyText(resp);
-        if (!text.trimStart().startsWith("Date")) throw new Error("not CSV");
-        return { text, src: "direct" };
-      }),
-  ];
-
-  let result;
-  try {
-    result = await Promise.any(attempts);
-  } catch (agg) {
-    const msgs = (agg.errors ?? []).map((e) => `  - ${e.message}`).join("\n");
-    throw new Error(`Stooq fallback failed for "${ticker}":\n${msgs}`);
-  }
-
-  return parseStooqCsv(result.text, ticker);
-}
-
 // ─── parsers ─────────────────────────────────────────────
+
+function parseYahooChart(json, ticker) {
+  const chart = json.chart.result[0];
+  const ts = chart.timestamp;
+  const q = chart.indicators?.quote?.[0] || {};
+  const adj = chart.indicators?.adjclose?.[0]?.adjclose;
+  if (!ts || !q.close) throw new Error(`Incomplete Yahoo chart data for "${ticker}".`);
+
+  const dates = [], prices = [], volumes = [], highs = [], lows = [], opens = [];
+  for (let i = 0; i < ts.length; i++) {
+    const p = adj?.[i] ?? q.close[i];
+    if (p == null || isNaN(p)) continue;
+    dates.push(new Date(ts[i] * 1000).toISOString().split("T")[0]);
+    prices.push(p);
+    volumes.push(q.volume?.[i] ?? 0);
+    highs.push(q.high?.[i] ?? p);
+    lows.push(q.low?.[i] ?? p);
+    opens.push(q.open?.[i] ?? p);
+  }
+  if (!prices.length) throw new Error(`No price rows for "${ticker}".`);
+  return { dates, prices, volumes, highs, lows, opens };
+}
 
 function parseStooqCsv(csv, ticker) {
   const lines = csv.trim().split("\n");
@@ -191,7 +174,6 @@ function parseStooqCsv(csv, ticker) {
     lows.push(lowI >= 0 ? (parseFloat(c[lowI]) || p) : p);
     opens.push(openI >= 0 ? (parseFloat(c[openI]) || p) : p);
   }
-
   if (!prices.length) throw new Error(`No valid rows in Stooq CSV for "${ticker}".`);
 
   // Stooq returns newest-first — reverse to ascending chronological order
@@ -199,34 +181,98 @@ function parseStooqCsv(csv, ticker) {
     dates.reverse(); prices.reverse(); volumes.reverse();
     highs.reverse(); lows.reverse(); opens.reverse();
   }
-
   return { dates, prices, volumes, highs, lows, opens };
+}
+
+// ─── fallback fetch (no API key) ─────────────────────────
+
+async function fetchFallback(ticker, startDate, endDate) {
+  const p1 = Math.floor(new Date(startDate).getTime() / 1000);
+  const p2 = Math.floor(new Date(endDate).getTime() / 1000);
+  const d1 = startDate.replace(/-/g, "");
+  const d2 = endDate.replace(/-/g, "");
+
+  const yahooBase =
+    `?period1=${p1}&period2=${p2}&interval=1d&includeAdjustedClose=true`;
+  const yahooQ1 =
+    `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}${yahooBase}`;
+  const yahooQ2 =
+    `https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}${yahooBase}`;
+  const stooqUrl =
+    `https://stooq.com/q/d/l/?s=${encodeURIComponent(ticker.toLowerCase())}.us` +
+    `&d1=${d1}&d2=${d2}&i=d`;
+
+  // Helper: attempt a Yahoo direct fetch
+  const tryYahoo = async (url, label) => {
+    const resp = await fetchWithTimeout(url, 10000);
+    if (!resp.ok) throw new Error(`${label}: HTTP ${resp.status}`);
+    const json = tryParseJson(await bodyText(resp));
+    if (!json?.chart?.result?.[0]) throw new Error(`${label}: not chart JSON`);
+    if (json.chart.error) throw new Error(`${label}: ${json.chart.error.description}`);
+    return parseYahooChart(json, ticker);
+  };
+
+  // Helper: attempt Stooq through a CORS proxy
+  const tryProxy = async (proxy) => {
+    const resp = await fetchWithTimeout(proxy.buildUrl(stooqUrl));
+    if (!resp.ok) throw new Error(`${proxy.name}: HTTP ${resp.status}`);
+    let text = await bodyText(resp);
+    if (proxy.envelope) text = unwrap(text);
+    if (!text.trimStart().startsWith("Date"))
+      throw new Error(`${proxy.name}: not CSV`);
+    return parseStooqCsv(text, ticker);
+  };
+
+  // Race everything in parallel — first success wins
+  const attempts = [
+    tryYahoo(yahooQ1, "yahoo-q1"),
+    tryYahoo(yahooQ2, "yahoo-q2"),
+    // Stooq direct (works on localhost without CORS issues)
+    fetchWithTimeout(stooqUrl, 8000).then(async (resp) => {
+      if (!resp.ok) throw new Error(`stooq-direct: HTTP ${resp.status}`);
+      const text = await bodyText(resp);
+      if (!text.trimStart().startsWith("Date")) throw new Error("stooq-direct: not CSV");
+      return parseStooqCsv(text, ticker);
+    }),
+    ...PROXIES.map(tryProxy),
+  ];
+
+  try {
+    return await Promise.any(attempts);
+  } catch (agg) {
+    const details = (agg.errors ?? []).map((e) => `  • ${e.message}`).join("\n");
+    throw new Error(
+      `All data sources failed for "${ticker}".\n\n` +
+      `To fix this, enter a free Alpha Vantage API key in the API Key field.\n` +
+      `Get one in 60 seconds at: https://www.alphavantage.co/support/#api-key\n\n` +
+      `Attempted sources:\n${details}`
+    );
+  }
 }
 
 // ─── main export ─────────────────────────────────────────
 
 /**
  * Fetch stock data. Uses Alpha Vantage if apiKey is provided,
- * falls back to Yahoo via CORS proxies.
+ * falls back to a parallel race of Yahoo direct + Stooq proxies.
  */
 export async function fetchStockData(ticker, startDate, endDate, apiKey) {
   const key = cacheKey(ticker, startDate, endDate);
   if (_cache[key]) return _cache[key];
 
-  // Strategy 1: Alpha Vantage (reliable, CORS-enabled)
+  // Strategy 1: Alpha Vantage (reliable, always CORS-enabled)
   if (apiKey) {
     try {
       const result = await fetchAlphaVantage(ticker, startDate, endDate, apiKey);
       _cache[key] = result;
       return result;
     } catch (avErr) {
-      // If AV fails (rate limit, bad key), fall through to Yahoo
-      console.warn("Alpha Vantage failed, trying Yahoo fallback:", avErr.message);
+      console.warn("Alpha Vantage failed, trying free fallback:", avErr.message);
     }
   }
 
-  // Strategy 2: Stooq via CORS proxies (free, no API key)
-  const result = await fetchStooqViaProxies(ticker, startDate, endDate);
+  // Strategy 2: Yahoo direct + Stooq via proxies (parallel race)
+  const result = await fetchFallback(ticker, startDate, endDate);
   _cache[key] = result;
   return result;
 }
