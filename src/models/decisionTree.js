@@ -246,6 +246,8 @@ export function evaluateDecisionTree(tree, testPrices, testVolumes) {
   const feats = computeFeatures(testPrices, testVolumes);
   let maeSum = 0, mseSum = 0, mapeSum = 0;
   let n = 0;
+  const preds = [];
+  const actuals = [];
 
   for (let i = 0; i < feats.length - 1; i++) {
     const x = featureVector(feats[i]);
@@ -256,12 +258,16 @@ export function evaluateDecisionTree(tree, testPrices, testVolumes) {
     mseSum += err * err;
     mapeSum += err / (Math.abs(actual) + 1e-10);
     n++;
+    preds.push(pred);
+    actuals.push(actual);
   }
 
-  if (n === 0) return { MAE: 0, RMSE: 0, MAPE: 0 };
+  if (n === 0) return { MAE: 0, RMSE: 0, MAPE: 0, preds: [], actuals: [] };
   return {
     MAE: +(maeSum / n).toFixed(4),
     RMSE: +Math.sqrt(mseSum / n).toFixed(4),
     MAPE: +((mapeSum / n) * 100).toFixed(4),
+    preds,
+    actuals,
   };
 }
