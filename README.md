@@ -1,7 +1,6 @@
 # Stock Forecast
 
-> **AP Research project — The Cushman School**
-> This tool was developed in the context of AP Research, where students conduct independent inquiry into quantitative and computational questions. See the [AP Research course repo](https://github.com/willieavendano/ap-research) for context and related work.
+> **Teaching exemplar.** Built by the author, working with AI co-authoring agents, as an exemplar for a secondary-school research course. No student contributed to this code. Catalogued by Null Design as ND-006.
 
 A client-side stock price forecasting app built with React. All models run **100% in the browser** — no backend server, no data leaves your machine.
 
