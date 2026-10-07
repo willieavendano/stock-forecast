@@ -69,7 +69,6 @@ export default function App() {
 
         // 2) Split
         const split = timeSplit(stock.prices);
-        const splitV = timeSplit(stock.volumes);
         log(`Split — train: ${split.train.length}, val: ${split.val.length}, test: ${split.test.length}`);
 
         const metricsResult = {};
@@ -122,14 +121,19 @@ export default function App() {
         if (params.models.includes("gbm")) {
           log("Fitting GBM parameters (drift & volatility)...");
           const gbmParams = fitGBM(split.train);
-          log(`GBM — mu=${gbmParams.mu.toFixed(4)}, sigma=${gbmParams.sigma.toFixed(4)}`);
+          log(`GBM (train split) — mu=${gbmParams.mu.toFixed(4)}, sigma=${gbmParams.sigma.toFixed(4)}`);
 
           testPaths.gbm = gbmMedianPaths(gbmParams, allPrices, origins, FORECAST_HORIZON);
           score("gbm", "GBM", testPaths.gbm);
 
+          // The test above uses train-only parameters; the forecast itself
+          // refits on everything up to the last bar.
+          const gbmLive = fitGBM(allPrices);
+          log(`GBM (refit on full history) — mu=${gbmLive.mu.toFixed(4)}, sigma=${gbmLive.sigma.toFixed(4)}`);
+
           log(`Simulating ${params.gbmPaths.toLocaleString()} Monte Carlo paths...`);
           const gbmFc = forecastGBM(
-            { ...gbmParams, lastPrice: allPrices[lastBar] },
+            gbmLive,
             FORECAST_HORIZON,
             params.gbmPaths
           );
@@ -143,8 +147,7 @@ export default function App() {
         if (params.models.includes("decision_tree")) {
           log("Training Decision Tree (grid search)...");
           const { tree, bestParams } = trainDecisionTree(
-            split.train, splitV.train,
-            split.val, splitV.val,
+            allPrices, allVolumes, trainEnd, testStart,
             (done, total) => {
               setProgress(55 + (done / total) * 25);
               if (done % 10 === 0) log(`  DT grid search: ${done}/${total}`);

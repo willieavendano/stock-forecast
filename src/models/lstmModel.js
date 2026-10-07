@@ -5,11 +5,15 @@
  *   Input(lookback,1) → LSTM(64) → Dropout(0.2) →
  *   LSTM(64) → Dropout(0.2) → Dense(32,relu) → Dense(1)
  *
+ * Input and target are standardised daily log returns, not price levels, so
+ * the model is not tied to the price range it was trained on.
+ *
  * Walk-forward iterative 30-trading-day forecast.
  */
 import * as tf from "@tensorflow/tfjs";
 import {
-  fitMinMaxScaler,
+  logReturns,
+  fitStandardScaler,
   buildSequences,
 } from "../data/preprocessing";
 
@@ -17,18 +21,20 @@ import {
  * Train the LSTM.
  * @param {number[]} trainPrices  raw prices (train split)
  * @param {number[]} valPrices    raw prices (val split)
- * @param {number}   lookback     window length (default 60)
+ * @param {number}   lookback     window length in daily returns (default 60)
  * @param {Function} onEpoch      callback(epoch, logs) for progress
  * @returns {{ model, scaler, history }}
  */
 export async function trainLSTM(trainPrices, valPrices, lookback = 60, onEpoch) {
   // Fit scaler on train only
-  const scaler = fitMinMaxScaler(trainPrices);
-  const trainScaled = scaler.transform(trainPrices);
+  const trainReturns = logReturns(trainPrices);
+  const scaler = fitStandardScaler(trainReturns);
+  const trainScaled = scaler.transform(trainReturns);
 
   // For val sequences we need the tail of train as context
-  const combined = [...trainPrices.slice(-lookback), ...valPrices];
-  const combinedScaled = scaler.transform(combined);
+  // (lookback returns take lookback + 1 prices)
+  const combined = [...trainPrices.slice(-(lookback + 1)), ...valPrices];
+  const combinedScaled = scaler.transform(logReturns(combined));
 
   const trainSeq = buildSequences(trainScaled, lookback);
   const valSeq = buildSequences(combinedScaled, lookback);
@@ -105,12 +111,12 @@ export async function trainLSTM(trainPrices, valPrices, lookback = 60, onEpoch) 
  * Iterative walk-forward forecast from each origin index, batched so every
  * origin advances one step per model call.
  * @param {number[]} prices   full price series
- * @param {number[]} origins  indices of the last known bar (each >= lookback - 1)
+ * @param {number[]} origins  indices of the last known bar (each >= lookback)
  * @returns {number[][]} one path of predicted prices (length = horizon) per origin
  */
 export async function forecastLSTM(model, scaler, prices, origins, lookback = 60, horizon = 30) {
   const windows = origins.map((o) =>
-    scaler.transform(prices.slice(o + 1 - lookback, o + 1))
+    scaler.transform(logReturns(prices.slice(o - lookback, o + 1)))
   );
   const pathsScaled = origins.map(() => []);
 
@@ -129,5 +135,9 @@ export async function forecastLSTM(model, scaler, prices, origins, lookback = 60
     pred.dispose();
   }
 
-  return pathsScaled.map((path) => scaler.inverse(path));
+  // Compound the predicted returns forward from each origin's last price
+  return pathsScaled.map((path, k) => {
+    let price = prices[origins[k]];
+    return scaler.inverse(path).map((r) => (price *= Math.exp(r)));
+  });
 }

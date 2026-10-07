@@ -5,7 +5,13 @@
  * Input:  { prices: number[], volumes: number[] }
  * Output: array of feature-row objects, one per bar from `from` onward.
  *         Every row uses only data up to and including its own bar.
+ *
+ * Every feature is relative (a return, a ratio, or an oscillator), never a
+ * price level, so a model trained at one price range still applies at another.
  */
+
+/** Bars before the slowest indicator (26-bar EMA + 9-bar signal) has settled. */
+export const FEATURE_WARMUP = 35;
 
 export function computeFeatures(prices, volumes, from = 0) {
   const n = prices.length;
@@ -25,23 +31,22 @@ export function computeFeatures(prices, volumes, from = 0) {
 
   for (let i = from; i < n; i++) {
     const row = {};
-    row.price = prices[i];
     row.logReturn = logReturns[i];
 
     // 5-day and 10-day returns
     row.return5d = i >= 5 ? (prices[i] - prices[i - 5]) / prices[i - 5] : 0;
     row.return10d = i >= 10 ? (prices[i] - prices[i - 10]) / prices[i - 10] : 0;
 
-    // Rolling mean/std 20
+    // Rolling mean/std 20, relative to the mean
     if (i >= 19) {
       const window = prices.slice(i - 19, i + 1);
       const mean = window.reduce((a, b) => a + b, 0) / 20;
       const std = Math.sqrt(window.reduce((a, b) => a + (b - mean) ** 2, 0) / 20);
-      row.rollingMean20 = mean;
-      row.rollingStd20 = std;
+      row.meanGap20 = prices[i] / mean - 1;
+      row.relStd20 = std / mean;
     } else {
-      row.rollingMean20 = prices[i];
-      row.rollingStd20 = 0;
+      row.meanGap20 = 0;
+      row.relStd20 = 0;
     }
 
     // RSI 14
@@ -59,10 +64,9 @@ export function computeFeatures(prices, volumes, from = 0) {
       row.rsi14 = 50;
     }
 
-    row.ema12 = ema12[i];
-    row.ema26 = ema26[i];
-    row.macd = macd[i];
-    row.macdSignal = macdSignal[i];
+    // MACD and its signal line, as a fraction of price
+    row.macd = macd[i] / prices[i];
+    row.macdSignal = macdSignal[i] / prices[i];
 
     // Volume ratio
     if (volumes && volumes.length === n && i >= 19) {
@@ -94,8 +98,8 @@ export const FEATURE_KEYS = [
   "logReturn",
   "return5d",
   "return10d",
-  "rollingMean20",
-  "rollingStd20",
+  "meanGap20",
+  "relStd20",
   "rsi14",
   "macd",
   "macdSignal",

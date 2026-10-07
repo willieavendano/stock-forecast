@@ -12,17 +12,9 @@
  * Extended for Monte Carlo: simulate nPaths, return median + 5th/95th bands.
  */
 
-const TRADING_DAYS = 252;
+import { mulberry32 } from "./rng";
 
-// Seedable pseudo-RNG (Mulberry32) so results are reproducible in browser
-function mulberry32(seed) {
-  return function () {
-    let t = (seed += 0x6d2b79f5);
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
+const TRADING_DAYS = 252;
 
 // Box-Muller transform for normal(0,1) from uniform
 function normalRandom(rng) {

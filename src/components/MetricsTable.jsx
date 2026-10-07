@@ -15,6 +15,10 @@ export default function MetricsTable({ metrics, horizon }) {
     return <p style={{ color: "var(--text-secondary)" }}>No metrics yet.</p>;
   }
 
+  // Every model is scored on the same test days, so any row gives the counts
+  const counts = Object.values(metrics)[0];
+  const days = (v) => (v ? ` (${v.n} test days)` : "");
+
   const cells = (v, key) =>
     COLUMNS.map((c, i) => (
       <td key={`${key}-${c}`} className={i === 0 ? "group-start" : undefined}>
@@ -28,8 +32,8 @@ export default function MetricsTable({ metrics, horizon }) {
         <thead>
           <tr>
             <th rowSpan={2}>Model</th>
-            <th colSpan={3} className="group">1 day ahead</th>
-            <th colSpan={3} className="group">{horizon} days ahead</th>
+            <th colSpan={3} className="group">1 day ahead{days(counts.day1)}</th>
+            <th colSpan={3} className="group">{horizon} days ahead{days(counts.dayH)}</th>
           </tr>
           <tr>
             {["day1", "dayH"].map((g) =>

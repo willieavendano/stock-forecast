@@ -1,5 +1,5 @@
 /**
- * Preprocessing utilities — time split, MinMax scaling, LSTM sequences.
+ * Preprocessing utilities — time split, log returns, scaling, LSTM sequences.
  * Pure JavaScript, runs in-browser.
  */
 
@@ -19,25 +19,31 @@ export function timeSplit(arr, trainFrac = 0.8, valFrac = 0.1) {
 }
 
 /**
- * MinMax scaler — fit on data, then transform / inverse.
+ * Daily log returns: ln(P[i] / P[i-1]). One shorter than the price series.
  */
-export function fitMinMaxScaler(data) {
-  let min = Infinity,
-    max = -Infinity;
-  for (const v of data) {
-    if (v < min) min = v;
-    if (v > max) max = v;
+export function logReturns(prices) {
+  const out = [];
+  for (let i = 1; i < prices.length; i++) {
+    out.push(Math.log(prices[i] / prices[i - 1]));
   }
-  const range = max - min || 1;
+  return out;
+}
+
+/**
+ * Standard (z-score) scaler — fit on data, then transform / inverse.
+ */
+export function fitStandardScaler(data) {
+  const mean = data.reduce((a, b) => a + b, 0) / data.length;
+  const std =
+    Math.sqrt(data.reduce((a, b) => a + (b - mean) ** 2, 0) / data.length) || 1;
   return {
-    min,
-    max,
-    range,
+    mean,
+    std,
     transform(arr) {
-      return arr.map((v) => (v - min) / range);
+      return arr.map((v) => (v - mean) / std);
     },
     inverse(arr) {
-      return arr.map((v) => v * range + min);
+      return arr.map((v) => v * std + mean);
     },
   };
 }

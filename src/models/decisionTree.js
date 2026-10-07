@@ -5,10 +5,15 @@
  * Grid-searched hyperparameters (max_depth, min_samples_split,
  * min_samples_leaf) on the validation set, best by RMSE.
  *
+ * The target is the next day's log return, not the next price: a tree can
+ * only output values it saw in training, so a tree fitted on price levels
+ * cannot follow a stock outside its training range.
+ *
  * No external libraries required — runs in the browser.
  */
 
-import { computeFeatures, FEATURE_KEYS, featureVector } from "../data/features";
+import { computeFeatures, featureVector, FEATURE_WARMUP } from "../data/features";
+import { mulberry32 } from "./rng";
 
 // ─── Tree Node ──────────────────────────────────────────
 
@@ -30,7 +35,7 @@ function mse(targets) {
   return targets.reduce((a, b) => a + (b - mean) ** 2, 0) / targets.length;
 }
 
-function buildTree(X, y, depth, maxDepth, minSplit, minLeaf, maxFeatures) {
+function buildTree(X, y, depth, maxDepth, minSplit, minLeaf, maxFeatures, rng) {
   const node = new TreeNode();
   node.value = y.reduce((a, b) => a + b, 0) / y.length;
 
@@ -48,10 +53,10 @@ function buildTree(X, y, depth, maxDepth, minSplit, minLeaf, maxFeatures) {
   let featureIndices;
   if (maxFeatures === "sqrt") {
     const k = Math.max(1, Math.floor(Math.sqrt(nFeatures)));
-    featureIndices = randomSubset(nFeatures, k);
+    featureIndices = randomSubset(nFeatures, k, rng);
   } else if (maxFeatures === "log2") {
     const k = Math.max(1, Math.floor(Math.log2(nFeatures)));
-    featureIndices = randomSubset(nFeatures, k);
+    featureIndices = randomSubset(nFeatures, k, rng);
   } else {
     featureIndices = Array.from({ length: nFeatures }, (_, i) => i);
   }
@@ -105,8 +110,8 @@ function buildTree(X, y, depth, maxDepth, minSplit, minLeaf, maxFeatures) {
   const rightX = bestRightIdx.map((i) => X[i]);
   const rightY = bestRightIdx.map((i) => y[i]);
 
-  node.left = buildTree(leftX, leftY, depth + 1, maxDepth, minSplit, minLeaf, maxFeatures);
-  node.right = buildTree(rightX, rightY, depth + 1, maxDepth, minSplit, minLeaf, maxFeatures);
+  node.left = buildTree(leftX, leftY, depth + 1, maxDepth, minSplit, minLeaf, maxFeatures, rng);
+  node.right = buildTree(rightX, rightY, depth + 1, maxDepth, minSplit, minLeaf, maxFeatures, rng);
 
   return node;
 }
@@ -117,13 +122,16 @@ function predict(node, x) {
   return predict(node.right, x);
 }
 
-function randomSubset(n, k) {
-  const all = Array.from({ length: n }, (_, i) => i);
-  for (let i = all.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [all[i], all[j]] = [all[j], all[i]];
+function shuffle(arr, rng) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
   }
-  return all.slice(0, k);
+  return arr;
+}
+
+function randomSubset(n, k, rng) {
+  return shuffle(Array.from({ length: n }, (_, i) => i), rng).slice(0, k);
 }
 
 // ─── Hyperparameter grid ────────────────────────────────
@@ -147,37 +155,31 @@ function* gridConfigs() {
 
 /**
  * Train a Decision Tree with grid search on validation RMSE.
- * @param {number[]} trainPrices
- * @param {number[]} trainVolumes
- * @param {number[]} valPrices
- * @param {number[]} valVolumes
+ * Features are computed once over the whole series (each row only looks
+ * backward), then rows are assigned to train or validation by target date.
+ * @param {number[]} prices    full price series
+ * @param {number[]} volumes   full volume series
+ * @param {number}   trainEnd  index of the first validation bar
+ * @param {number}   valEnd    index of the first test bar
  * @param {Function} onProgress — (tried, total) callback
+ * @param {number}   seed      seeds the grid sample and feature subsets
  * @returns {{ tree, bestParams }}
  */
-export function trainDecisionTree(
-  trainPrices,
-  trainVolumes,
-  valPrices,
-  valVolumes,
-  onProgress
-) {
-  const trainFeats = computeFeatures(trainPrices, trainVolumes);
-  const valFeats = computeFeatures(valPrices, valVolumes);
+export function trainDecisionTree(prices, volumes, trainEnd, valEnd, onProgress, seed = 42) {
+  const rng = mulberry32(seed);
+  const feats = computeFeatures(prices.slice(0, valEnd), volumes.slice(0, valEnd));
 
-  // Supervised: features at time t, target = price at t+1
-  const Xtrain = [];
-  const ytrain = [];
-  for (let i = 0; i < trainFeats.length - 1; i++) {
-    Xtrain.push(featureVector(trainFeats[i]));
-    ytrain.push(trainPrices[i + 1]);
-  }
-
-  const Xval = [];
-  const yval = [];
-  for (let i = 0; i < valFeats.length - 1; i++) {
-    Xval.push(featureVector(valFeats[i]));
-    yval.push(valPrices[i + 1]);
-  }
+  // Supervised: features at time t, target = log return from t to t+1
+  const supervised = (from, to) => {
+    const X = [], y = [];
+    for (let t = from; t < to; t++) {
+      X.push(featureVector(feats[t]));
+      y.push(Math.log(prices[t + 1] / prices[t]));
+    }
+    return { X, y };
+  };
+  const { X: Xtrain, y: ytrain } = supervised(FEATURE_WARMUP, trainEnd - 1);
+  const { X: Xval, y: yval } = supervised(trainEnd - 1, valEnd - 1);
 
   let bestRMSE = Infinity;
   let bestTree = null;
@@ -189,13 +191,13 @@ export function trainDecisionTree(
   const sampled =
     configs.length <= maxConfigs
       ? configs
-      : configs.sort(() => Math.random() - 0.5).slice(0, maxConfigs);
+      : shuffle(configs, rng).slice(0, maxConfigs);
 
   for (let ci = 0; ci < sampled.length; ci++) {
     const c = sampled[ci];
     const tree = buildTree(
       Xtrain, ytrain, 0,
-      c.maxDepth, c.minSamplesSplit, c.minSamplesLeaf, c.maxFeatures
+      c.maxDepth, c.minSamplesSplit, c.minSamplesLeaf, c.maxFeatures, rng
     );
 
     // Evaluate on val
@@ -230,7 +232,7 @@ export function forecastDecisionTree(tree, allPrices, allVolumes, origins, horiz
 
     for (let step = 0; step < horizon; step++) {
       const [lastRow] = computeFeatures(prices, volumes, prices.length - 1);
-      const pred = predict(tree, featureVector(lastRow));
+      const pred = prices[prices.length - 1] * Math.exp(predict(tree, featureVector(lastRow)));
       path.push(pred);
       prices.push(pred);
       volumes.push(volumes[volumes.length - 1]); // carry forward last volume
