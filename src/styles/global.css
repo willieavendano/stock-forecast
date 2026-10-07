@@ -110,6 +110,9 @@ input:disabled { opacity: 0.5; }
 .metrics-table th, .metrics-table td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); }
 .metrics-table th { color: var(--accent); font-weight: 600; }
 .metrics-table tr:hover { background: rgba(0,212,255,0.05); }
+.metrics-table .group { text-align: center; border-left: 1px solid var(--border); }
+.metrics-table .group-start { border-left: 1px solid var(--border); }
+.metrics-note { color: var(--text-secondary); font-size: 0.8rem; margin-top: 12px; line-height: 1.5; }
 
 .log-area {
   background: var(--bg-primary);
@@ -143,6 +146,7 @@ input:disabled { opacity: 0.5; }
 .tag-gbm { background: #6a1b9a; color: #fff; }
 .tag-dt { background: #2e7d32; color: #fff; }
 .tag-ensemble { background: #e65100; color: #fff; }
+.tag-naive { background: #455a64; color: #fff; }
 
 .custom-tooltip {
   background: var(--bg-card); border: 1px solid var(--border);

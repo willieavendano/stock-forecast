@@ -22,7 +22,7 @@ export default function OutputPanel({ metrics, forecastResult }) {
       {metrics && (
         <div className="card">
           <h3>Model Metrics — {metrics.ticker} (test set)</h3>
-          <MetricsTable metrics={metrics.metrics} />
+          <MetricsTable metrics={metrics.metrics} horizon={metrics.horizon} />
         </div>
       )}
 

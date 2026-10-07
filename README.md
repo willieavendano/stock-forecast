@@ -8,18 +8,20 @@ A client-side stock price forecasting app built with React. All models run **100
 
 | Model | Description |
 |-------|-------------|
-| **LSTM** | TensorFlow.js two-layer LSTM (64 units each) with dropout and early stopping, trained on a configurable lookback window |
-| **GBM** | Geometric Brownian Motion — fits drift (µ) and volatility (σ) from historical log returns, then runs Monte Carlo simulations to produce median forecasts and 5–95% confidence bands |
-| **Decision Tree** | CART-style regressor with grid-searched hyperparameters (depth, min samples, max features) evaluated on a hold-out validation set; uses 9 engineered technical features (RSI, MACD, rolling stats, etc.) |
+| **LSTM** | TensorFlow.js two-layer LSTM (64 units each) with dropout and early stopping, trained on a configurable lookback window of daily log returns |
+| **GBM** | Geometric Brownian Motion — fits drift (µ) and volatility (σ) from historical log returns, then runs Monte Carlo simulations to produce median forecasts and 5–95% confidence bands. Scored with train-split parameters; the charted forecast refits on the full history |
+| **Decision Tree** | CART-style regressor that predicts the next day's log return, with grid-searched hyperparameters (depth, min samples, max features) evaluated on a hold-out validation set; uses 9 engineered technical features (RSI, MACD, rolling stats, etc.), all relative rather than price levels |
 | **Ensemble** | Equal-weight average of all selected models, with confidence bands widened by cross-model disagreement |
 
 ## Metrics
 
-After training, each model (including the Ensemble) is evaluated on a held-out test set and reported as:
+After training, each model (including the Ensemble) is scored on a held-out test set with a walk-forward test: every test-set day is predicted twice, once from 1 trading day earlier and once from 30 trading days earlier (the horizon the chart forecasts). Both are reported as:
 
 - **MAE** — Mean Absolute Error
 - **RMSE** — Root Mean Squared Error
 - **MAPE** — Mean Absolute Percentage Error (%)
+
+A **Naive** baseline — the last known price carried forward unchanged — is scored the same way and shown as its own row. A model adds information only where its error is lower than that row.
 
 ## Data
 
@@ -29,6 +31,8 @@ Stock data is fetched client-side via:
 - **Yahoo Finance** via CORS proxies — fallback, no API key required (may be rate-limited)
 
 Data is split into train / validation / test (80 / 10 / 10) with no look-ahead bias.
+
+The LSTM and Decision Tree model **returns, not prices**. A model fitted on price levels cannot follow a stock that has moved outside the range it was trained on; predicted returns are compounded forward from the last known price instead.
 
 ## Tech Stack
 

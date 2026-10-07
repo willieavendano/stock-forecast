@@ -7,19 +7,14 @@
  * GBM formula per path:
  *   S(t) = S0 * exp[ (mu - 0.5*sigma^2)*t  +  sigma * W(t) ]
  * where W(t) is a Brownian path (cumulative sum of N(0,sqrt(dt)) increments).
+ * mu and sigma are annualised, so t is in years: one trading day is 1/252.
  *
  * Extended for Monte Carlo: simulate nPaths, return median + 5th/95th bands.
  */
 
-// Seedable pseudo-RNG (Mulberry32) so results are reproducible in browser
-function mulberry32(seed) {
-  return function () {
-    let t = (seed += 0x6d2b79f5);
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
+import { mulberry32 } from "./rng";
+
+const TRADING_DAYS = 252;
 
 // Box-Muller transform for normal(0,1) from uniform
 function normalRandom(rng) {
@@ -46,8 +41,8 @@ export function fitGBM(prices) {
     returns.reduce((a, b) => a + (b - mean) ** 2, 0) / returns.length;
   const std = Math.sqrt(variance);
 
-  const mu = mean * 252; // annualised
-  const sigma = std * Math.sqrt(252); // annualised
+  const mu = mean * TRADING_DAYS; // annualised
+  const sigma = std * Math.sqrt(TRADING_DAYS); // annualised
 
   return { mu, sigma, lastPrice: prices[prices.length - 1] };
 }
@@ -64,8 +59,8 @@ export function forecastGBM(
 ) {
   const rng = mulberry32(seed);
   const forecastPeriod = horizon;
-  const dt = 1 / forecastPeriod;
-  const timeAxis = Array.from({ length: forecastPeriod + 1 }, (_, i) => i / forecastPeriod);
+  const dt = 1 / TRADING_DAYS;
+  const timeAxis = Array.from({ length: forecastPeriod + 1 }, (_, i) => i * dt);
 
   // paths[p][t] — each path has horizon+1 points, first is lastPrice
   const paths = [];
@@ -107,34 +102,15 @@ export function forecastGBM(
 }
 
 /**
- * Evaluate GBM on test data via rolling 1-step median forecast.
- * @returns {{ MAE, RMSE, MAPE }}
+ * Closed-form GBM median path from each origin:
+ *   S0 * exp[ (mu - 0.5*sigma^2) * t ]
+ * This is the value the Monte Carlo median converges to, so the walk-forward
+ * test uses it directly instead of re-simulating from every origin.
+ * @returns {number[][]} one path of length `horizon` per origin
  */
-export function evaluateGBM(params, testPrices, contextLastPrice) {
-  const preds = [];
-  for (let i = 0; i < testPrices.length; i++) {
-    const price = i === 0 ? contextLastPrice : testPrices[i - 1];
-    const p = { ...params, lastPrice: price };
-    const { median } = forecastGBM(p, 1, 500, 42 + i);
-    preds.push(median[0]);
-  }
-
-  let maeSum = 0,
-    mseSum = 0,
-    mapeSum = 0;
-  const n = testPrices.length;
-  for (let i = 0; i < n; i++) {
-    const err = Math.abs(preds[i] - testPrices[i]);
-    maeSum += err;
-    mseSum += err * err;
-    mapeSum += err / (Math.abs(testPrices[i]) + 1e-10);
-  }
-
-  return {
-    MAE: +(maeSum / n).toFixed(4),
-    RMSE: +Math.sqrt(mseSum / n).toFixed(4),
-    MAPE: +((mapeSum / n) * 100).toFixed(4),
-    preds,
-    actuals: [...testPrices],
-  };
+export function gbmMedianPaths({ mu, sigma }, prices, origins, horizon = 30) {
+  const dailyDrift = (mu - 0.5 * sigma * sigma) / TRADING_DAYS;
+  return origins.map((o) =>
+    Array.from({ length: horizon }, (_, i) => prices[o] * Math.exp(dailyDrift * (i + 1)))
+  );
 }
