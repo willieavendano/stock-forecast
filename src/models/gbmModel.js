@@ -110,34 +110,15 @@ export function forecastGBM(
 }
 
 /**
- * Evaluate GBM on test data via rolling 1-step median forecast.
- * @returns {{ MAE, RMSE, MAPE }}
+ * Closed-form GBM median path from each origin:
+ *   S0 * exp[ (mu - 0.5*sigma^2) * t ]
+ * This is the value the Monte Carlo median converges to, so the walk-forward
+ * test uses it directly instead of re-simulating from every origin.
+ * @returns {number[][]} one path of length `horizon` per origin
  */
-export function evaluateGBM(params, testPrices, contextLastPrice) {
-  const preds = [];
-  for (let i = 0; i < testPrices.length; i++) {
-    const price = i === 0 ? contextLastPrice : testPrices[i - 1];
-    const p = { ...params, lastPrice: price };
-    const { median } = forecastGBM(p, 1, 500, 42 + i);
-    preds.push(median[0]);
-  }
-
-  let maeSum = 0,
-    mseSum = 0,
-    mapeSum = 0;
-  const n = testPrices.length;
-  for (let i = 0; i < n; i++) {
-    const err = Math.abs(preds[i] - testPrices[i]);
-    maeSum += err;
-    mseSum += err * err;
-    mapeSum += err / (Math.abs(testPrices[i]) + 1e-10);
-  }
-
-  return {
-    MAE: +(maeSum / n).toFixed(4),
-    RMSE: +Math.sqrt(mseSum / n).toFixed(4),
-    MAPE: +((mapeSum / n) * 100).toFixed(4),
-    preds,
-    actuals: [...testPrices],
-  };
+export function gbmMedianPaths({ mu, sigma }, prices, origins, horizon = 30) {
+  const dailyDrift = (mu - 0.5 * sigma * sigma) / TRADING_DAYS;
+  return origins.map((o) =>
+    Array.from({ length: horizon }, (_, i) => prices[o] * Math.exp(dailyDrift * (i + 1)))
+  );
 }

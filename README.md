@@ -15,11 +15,13 @@ A client-side stock price forecasting app built with React. All models run **100
 
 ## Metrics
 
-After training, each model (including the Ensemble) is evaluated on a held-out test set and reported as:
+After training, each model (including the Ensemble) is scored on a held-out test set with a walk-forward test: every test-set day is predicted twice, once from 1 trading day earlier and once from 30 trading days earlier (the horizon the chart forecasts). Both are reported as:
 
 - **MAE** — Mean Absolute Error
 - **RMSE** — Root Mean Squared Error
 - **MAPE** — Mean Absolute Percentage Error (%)
+
+A **Naive** baseline — the last known price carried forward unchanged — is scored the same way and shown as its own row. A model adds information only where its error is lower than that row.
 
 ## Data
 

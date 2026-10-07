@@ -102,61 +102,32 @@ export async function trainLSTM(trainPrices, valPrices, lookback = 60, onEpoch) 
 }
 
 /**
- * Iterative walk-forward 30-day forecast.
- * @returns {number[]} array of predicted prices (length = horizon)
+ * Iterative walk-forward forecast from each origin index, batched so every
+ * origin advances one step per model call.
+ * @param {number[]} prices   full price series
+ * @param {number[]} origins  indices of the last known bar (each >= lookback - 1)
+ * @returns {number[][]} one path of predicted prices (length = horizon) per origin
  */
-export async function forecastLSTM(model, scaler, recentPrices, lookback = 60, horizon = 30) {
-  const scaled = scaler.transform(recentPrices.slice(-lookback));
-  const window = [...scaled];
-  const predsScaled = [];
+export async function forecastLSTM(model, scaler, prices, origins, lookback = 60, horizon = 30) {
+  const windows = origins.map((o) =>
+    scaler.transform(prices.slice(o + 1 - lookback, o + 1))
+  );
+  const pathsScaled = origins.map(() => []);
 
   for (let step = 0; step < horizon; step++) {
     const input = tf.tensor3d(
-      [window.slice(-lookback).map((v) => [v])],
-      [1, lookback, 1]
+      windows.map((w) => w.map((v) => [v])),
+      [origins.length, lookback, 1]
     );
     const pred = model.predict(input);
-    const val = (await pred.data())[0];
-    predsScaled.push(val);
-    window.push(val);
+    const vals = await pred.data();
+    for (let k = 0; k < origins.length; k++) {
+      pathsScaled[k].push(vals[k]);
+      windows[k] = [...windows[k].slice(1), vals[k]];
+    }
     input.dispose();
     pred.dispose();
   }
 
-  return scaler.inverse(predsScaled);
-}
-
-/**
- * Evaluate on test set — returns { MAE, RMSE, MAPE }.
- */
-export async function evaluateLSTM(model, scaler, testPrices, contextPrices, lookback = 60) {
-  const full = [...contextPrices.slice(-lookback), ...testPrices];
-  const fullScaled = scaler.transform(full);
-  const seq = buildSequences(fullScaled, lookback);
-
-  const xTest = tf.tensor3d(seq.X);
-  const predsTensor = model.predict(xTest);
-  const predsScaled = await predsTensor.data();
-  xTest.dispose();
-  predsTensor.dispose();
-
-  const preds = scaler.inverse(Array.from(predsScaled));
-  const actuals = scaler.inverse(seq.y);
-
-  let maeSum = 0, mseSum = 0, mapeSum = 0;
-  const n = preds.length;
-  for (let i = 0; i < n; i++) {
-    const err = Math.abs(preds[i] - actuals[i]);
-    maeSum += err;
-    mseSum += err * err;
-    mapeSum += err / (Math.abs(actuals[i]) + 1e-10);
-  }
-
-  return {
-    MAE: +(maeSum / n).toFixed(4),
-    RMSE: +Math.sqrt(mseSum / n).toFixed(4),
-    MAPE: +((mapeSum / n) * 100).toFixed(4),
-    preds,
-    actuals: Array.from(actuals),
-  };
+  return pathsScaled.map((path) => scaler.inverse(path));
 }

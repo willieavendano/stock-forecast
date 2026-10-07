@@ -53,46 +53,15 @@ export function ensembleForecasts(forecasts, bands) {
 }
 
 /**
- * Evaluate ensemble on test set using individual model test predictions.
+ * Equal-weight average of several models' walk-forward paths, so the
+ * ensemble is scored on the same origins as its members.
  *
- * LSTM and GBM predict testPrices[0..n-1] (length n).
- * Decision Tree predicts testPrices[1..n-1] (length n-1).
- * Slicing all arrays to the shortest length aligns them to the same actuals.
- *
- * @param {Object} evalResults — { [modelName]: { preds: number[], actuals: number[] } }
- * @returns {{ MAE: number, RMSE: number, MAPE: number }}
+ * @param {number[][][]} pathSets — one number[][] of paths per model
+ * @returns {number[][]}
  */
-export function evaluateEnsemble(evalResults) {
-  const models = Object.keys(evalResults);
-  if (models.length < 2) throw new Error("Need at least 2 models for ensemble evaluation.");
-
-  // Align to the shortest prediction array (handles LSTM/GBM vs DT 1-step offset)
-  const minLen = Math.min(...models.map((m) => evalResults[m].preds.length));
-  const w = 1 / models.length;
-
-  const ensemblePreds = new Array(minLen).fill(0);
-  for (const m of models) {
-    const p = evalResults[m].preds.slice(-minLen);
-    for (let i = 0; i < minLen; i++) {
-      ensemblePreds[i] += w * p[i];
-    }
-  }
-
-  // Use actuals from the model with the shortest array (naturally aligned after slice)
-  const shortestModel = models.find((m) => evalResults[m].preds.length === minLen);
-  const actuals = evalResults[shortestModel].actuals;
-
-  let maeSum = 0, mseSum = 0, mapeSum = 0;
-  for (let i = 0; i < minLen; i++) {
-    const err = Math.abs(ensemblePreds[i] - actuals[i]);
-    maeSum += err;
-    mseSum += err * err;
-    mapeSum += err / (Math.abs(actuals[i]) + 1e-10);
-  }
-
-  return {
-    MAE: +(maeSum / minLen).toFixed(4),
-    RMSE: +Math.sqrt(mseSum / minLen).toFixed(4),
-    MAPE: +((mapeSum / minLen) * 100).toFixed(4),
-  };
+export function averagePaths(pathSets) {
+  const w = 1 / pathSets.length;
+  return pathSets[0].map((path, k) =>
+    path.map((_, t) => pathSets.reduce((sum, paths) => sum + w * paths[k][t], 0))
+  );
 }

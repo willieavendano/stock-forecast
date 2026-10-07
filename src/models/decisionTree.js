@@ -219,55 +219,23 @@ export function trainDecisionTree(
 }
 
 /**
- * Recursive multi-step forecast.
+ * Recursive multi-step forecast from each origin index.
+ * @returns {number[][]} one path of predicted prices (length = horizon) per origin
  */
-export function forecastDecisionTree(tree, recentPrices, recentVolumes, horizon = 30) {
-  const prices = [...recentPrices];
-  const volumes = [...recentVolumes];
-  const predictions = [];
+export function forecastDecisionTree(tree, allPrices, allVolumes, origins, horizon = 30) {
+  return origins.map((o) => {
+    const prices = allPrices.slice(0, o + 1);
+    const volumes = allVolumes.slice(0, o + 1);
+    const path = [];
 
-  for (let step = 0; step < horizon; step++) {
-    const feats = computeFeatures(prices, volumes);
-    const lastRow = feats[feats.length - 1];
-    const x = featureVector(lastRow);
-    const pred = predict(tree, x);
-    predictions.push(pred);
-    prices.push(pred);
-    volumes.push(volumes[volumes.length - 1]); // carry forward last volume
-  }
+    for (let step = 0; step < horizon; step++) {
+      const [lastRow] = computeFeatures(prices, volumes, prices.length - 1);
+      const pred = predict(tree, featureVector(lastRow));
+      path.push(pred);
+      prices.push(pred);
+      volumes.push(volumes[volumes.length - 1]); // carry forward last volume
+    }
 
-  return predictions;
-}
-
-/**
- * Evaluate on test set (1-step).
- */
-export function evaluateDecisionTree(tree, testPrices, testVolumes) {
-  const feats = computeFeatures(testPrices, testVolumes);
-  let maeSum = 0, mseSum = 0, mapeSum = 0;
-  let n = 0;
-  const preds = [];
-  const actuals = [];
-
-  for (let i = 0; i < feats.length - 1; i++) {
-    const x = featureVector(feats[i]);
-    const pred = predict(tree, x);
-    const actual = testPrices[i + 1];
-    const err = Math.abs(pred - actual);
-    maeSum += err;
-    mseSum += err * err;
-    mapeSum += err / (Math.abs(actual) + 1e-10);
-    n++;
-    preds.push(pred);
-    actuals.push(actual);
-  }
-
-  if (n === 0) return { MAE: 0, RMSE: 0, MAPE: 0, preds: [], actuals: [] };
-  return {
-    MAE: +(maeSum / n).toFixed(4),
-    RMSE: +Math.sqrt(mseSum / n).toFixed(4),
-    MAPE: +((mapeSum / n) * 100).toFixed(4),
-    preds,
-    actuals,
-  };
+    return path;
+  });
 }

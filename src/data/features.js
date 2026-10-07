@@ -3,10 +3,11 @@
  * All computations are pure JS — no backend required.
  *
  * Input:  { prices: number[], volumes: number[] }
- * Output: array of feature-row objects, one per valid bar.
+ * Output: array of feature-row objects, one per bar from `from` onward.
+ *         Every row uses only data up to and including its own bar.
  */
 
-export function computeFeatures(prices, volumes) {
+export function computeFeatures(prices, volumes, from = 0) {
   const n = prices.length;
   const rows = [];
 
@@ -16,7 +17,13 @@ export function computeFeatures(prices, volumes) {
     logReturns.push(Math.log(prices[i] / prices[i - 1]));
   }
 
-  for (let i = 0; i < n; i++) {
+  // MACD (12/26/9)
+  const ema12 = emaSeries(prices, 12);
+  const ema26 = emaSeries(prices, 26);
+  const macd = ema12.map((v, i) => v - ema26[i]);
+  const macdSignal = emaSeries(macd, 9);
+
+  for (let i = from; i < n; i++) {
     const row = {};
     row.price = prices[i];
     row.logReturn = logReturns[i];
@@ -52,10 +59,10 @@ export function computeFeatures(prices, volumes) {
       row.rsi14 = 50;
     }
 
-    // MACD (12/26/9)
-    row.ema12 = ema(prices, 12, i);
-    row.ema26 = ema(prices, 26, i);
-    row.macd = row.ema12 - row.ema26;
+    row.ema12 = ema12[i];
+    row.ema26 = ema26[i];
+    row.macd = macd[i];
+    row.macdSignal = macdSignal[i];
 
     // Volume ratio
     if (volumes && volumes.length === n && i >= 19) {
@@ -69,23 +76,17 @@ export function computeFeatures(prices, volumes) {
     rows.push(row);
   }
 
-  // MACD signal (9-period EMA of MACD)
-  const macds = rows.map((r) => r.macd);
-  for (let i = 0; i < rows.length; i++) {
-    rows[i].macdSignal = ema(macds, 9, i);
-  }
-
   return rows;
 }
 
-/** Simple EMA at index i for a given span. */
-function ema(arr, span, idx) {
+/** Simple EMA of a series for a given span, one value per bar. */
+function emaSeries(arr, span) {
   const k = 2 / (span + 1);
-  let val = arr[0];
-  for (let i = 1; i <= Math.min(idx, arr.length - 1); i++) {
-    val = arr[i] * k + val * (1 - k);
+  const out = [arr[0]];
+  for (let i = 1; i < arr.length; i++) {
+    out.push(arr[i] * k + out[i - 1] * (1 - k));
   }
-  return val;
+  return out;
 }
 
 /** Convert feature rows to a flat float array for a given set of keys. */

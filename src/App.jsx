@@ -5,14 +5,11 @@ import LogPanel from "./components/LogPanel.jsx";
 
 import { fetchStockData } from "./data/fetchStock";
 import { timeSplit } from "./data/preprocessing";
-import { trainLSTM, forecastLSTM, evaluateLSTM } from "./models/lstmModel";
-import { fitGBM, forecastGBM, evaluateGBM } from "./models/gbmModel";
-import {
-  trainDecisionTree,
-  forecastDecisionTree,
-  evaluateDecisionTree,
-} from "./models/decisionTree";
-import { ensembleForecasts, evaluateEnsemble } from "./models/ensemble";
+import { trainLSTM, forecastLSTM } from "./models/lstmModel";
+import { fitGBM, forecastGBM, gbmMedianPaths } from "./models/gbmModel";
+import { trainDecisionTree, forecastDecisionTree } from "./models/decisionTree";
+import { ensembleForecasts, averagePaths } from "./models/ensemble";
+import { walkForwardOrigins, scorePaths, naivePaths } from "./models/evaluation";
 
 const FORECAST_HORIZON = 30;
 
@@ -76,11 +73,29 @@ export default function App() {
         log(`Split — train: ${split.train.length}, val: ${split.val.length}, test: ${split.test.length}`);
 
         const metricsResult = {};
-        const evalResults = {};
         const forecasts = {};
         const bands = {};
         const allPrices = stock.prices;
         const allVolumes = stock.volumes;
+
+        // Walk-forward test: every model forecasts from the same origins, and
+        // each test day is scored from 1 and from 30 trading days earlier.
+        const trainEnd = split.train.length;
+        const testStart = trainEnd + split.val.length;
+        const lastBar = allPrices.length - 1;
+        const origins = walkForwardOrigins(
+          allPrices.length, testStart, FORECAST_HORIZON,
+          Math.max(trainEnd - 1, params.lookback)
+        );
+        const testPaths = {};
+        const score = (name, label, paths) => {
+          const m = scorePaths(paths, origins, allPrices, testStart, FORECAST_HORIZON);
+          metricsResult[name] = m;
+          log(
+            `${label} test — 1-day MAPE: ${m.day1.MAPE}%` +
+            (m.dayH ? `, ${FORECAST_HORIZON}-day MAPE: ${m.dayH.MAPE}%` : "")
+          );
+        };
 
         // 3) LSTM
         if (params.models.includes("lstm")) {
@@ -96,13 +111,10 @@ export default function App() {
           );
           log(`LSTM trained — ${history.loss.length} epochs.`, "success");
 
-          const lstmMetrics = await evaluateLSTM(model, scaler, split.test, split.val, params.lookback);
-          metricsResult.lstm = { MAE: lstmMetrics.MAE, RMSE: lstmMetrics.RMSE, MAPE: lstmMetrics.MAPE };
-          evalResults.lstm = { preds: lstmMetrics.preds, actuals: lstmMetrics.actuals };
-          log(`LSTM test — MAE: ${lstmMetrics.MAE}, RMSE: ${lstmMetrics.RMSE}, MAPE: ${lstmMetrics.MAPE}%`);
+          testPaths.lstm = await forecastLSTM(model, scaler, allPrices, origins, params.lookback, FORECAST_HORIZON);
+          score("lstm", "LSTM", testPaths.lstm);
 
-          const lstmFc = await forecastLSTM(model, scaler, allPrices, params.lookback, FORECAST_HORIZON);
-          forecasts.lstm = lstmFc;
+          [forecasts.lstm] = await forecastLSTM(model, scaler, allPrices, [lastBar], params.lookback, FORECAST_HORIZON);
         }
         setProgress(35);
 
@@ -112,14 +124,12 @@ export default function App() {
           const gbmParams = fitGBM(split.train);
           log(`GBM — mu=${gbmParams.mu.toFixed(4)}, sigma=${gbmParams.sigma.toFixed(4)}`);
 
-          log(`Simulating ${params.gbmPaths.toLocaleString()} Monte Carlo paths...`);
-          const gbmMetrics = evaluateGBM(gbmParams, split.test, split.val[split.val.length - 1]);
-          metricsResult.gbm = { MAE: gbmMetrics.MAE, RMSE: gbmMetrics.RMSE, MAPE: gbmMetrics.MAPE };
-          evalResults.gbm = { preds: gbmMetrics.preds, actuals: gbmMetrics.actuals };
-          log(`GBM test — MAE: ${gbmMetrics.MAE}, RMSE: ${gbmMetrics.RMSE}, MAPE: ${gbmMetrics.MAPE}%`);
+          testPaths.gbm = gbmMedianPaths(gbmParams, allPrices, origins, FORECAST_HORIZON);
+          score("gbm", "GBM", testPaths.gbm);
 
+          log(`Simulating ${params.gbmPaths.toLocaleString()} Monte Carlo paths...`);
           const gbmFc = forecastGBM(
-            { ...gbmParams, lastPrice: allPrices[allPrices.length - 1] },
+            { ...gbmParams, lastPrice: allPrices[lastBar] },
             FORECAST_HORIZON,
             params.gbmPaths
           );
@@ -142,13 +152,10 @@ export default function App() {
           );
           log(`DT best params: depth=${bestParams.maxDepth}, split=${bestParams.minSamplesSplit}, leaf=${bestParams.minSamplesLeaf}`, "success");
 
-          const dtMetrics = evaluateDecisionTree(tree, split.test, splitV.test);
-          metricsResult.decision_tree = { MAE: dtMetrics.MAE, RMSE: dtMetrics.RMSE, MAPE: dtMetrics.MAPE };
-          evalResults.decision_tree = { preds: dtMetrics.preds, actuals: dtMetrics.actuals };
-          log(`DT test — MAE: ${dtMetrics.MAE}, RMSE: ${dtMetrics.RMSE}, MAPE: ${dtMetrics.MAPE}%`);
+          testPaths.decision_tree = forecastDecisionTree(tree, allPrices, allVolumes, origins, FORECAST_HORIZON);
+          score("decision_tree", "DT", testPaths.decision_tree);
 
-          const dtFc = forecastDecisionTree(tree, allPrices, allVolumes, FORECAST_HORIZON);
-          forecasts.decision_tree = dtFc;
+          [forecasts.decision_tree] = forecastDecisionTree(tree, allPrices, allVolumes, [lastBar], FORECAST_HORIZON);
         }
         setProgress(85);
 
@@ -159,13 +166,12 @@ export default function App() {
           forecasts.ensemble = ens.point;
           bands.ensemble = { lower5: ens.lower5, upper95: ens.upper95 };
 
-          if (Object.keys(evalResults).length >= 2) {
-            const ensMetrics = evaluateEnsemble(evalResults);
-            metricsResult.ensemble = ensMetrics;
-            log(`Ensemble test — MAE: ${ensMetrics.MAE}, RMSE: ${ensMetrics.RMSE}, MAPE: ${ensMetrics.MAPE}%`);
-          }
+          score("ensemble", "Ensemble", averagePaths(Object.values(testPaths)));
           log("Ensemble forecast generated.", "success");
         }
+
+        // Baseline every model has to beat: the last known price, unchanged
+        score("naive", "Naive", naivePaths(allPrices, origins, FORECAST_HORIZON));
 
         // 7) Build output
         const lastDate = stock.dates[stock.dates.length - 1];
@@ -176,7 +182,7 @@ export default function App() {
         const histDates = stock.dates.slice(-histTail);
         const histPrices = stock.prices.slice(-histTail);
 
-        setMetrics({ ticker: params.ticker, metrics: metricsResult });
+        setMetrics({ ticker: params.ticker, horizon: FORECAST_HORIZON, metrics: metricsResult });
         setForecastResult({
           ticker: params.ticker,
           horizon: FORECAST_HORIZON,
