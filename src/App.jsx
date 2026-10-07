@@ -18,10 +18,11 @@ const FORECAST_HORIZON = 30;
 
 function tradingDatesAhead(lastDateStr, n) {
   const dates = [];
+  // Date-only strings parse as UTC midnight, so read the weekday in UTC too
   let d = new Date(lastDateStr);
   while (dates.length < n) {
     d = new Date(d.getTime() + 86400000);
-    const dow = d.getDay();
+    const dow = d.getUTCDay();
     if (dow !== 0 && dow !== 6) {
       dates.push(d.toISOString().split("T")[0]);
     }

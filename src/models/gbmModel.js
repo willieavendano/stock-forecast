@@ -7,9 +7,12 @@
  * GBM formula per path:
  *   S(t) = S0 * exp[ (mu - 0.5*sigma^2)*t  +  sigma * W(t) ]
  * where W(t) is a Brownian path (cumulative sum of N(0,sqrt(dt)) increments).
+ * mu and sigma are annualised, so t is in years: one trading day is 1/252.
  *
  * Extended for Monte Carlo: simulate nPaths, return median + 5th/95th bands.
  */
+
+const TRADING_DAYS = 252;
 
 // Seedable pseudo-RNG (Mulberry32) so results are reproducible in browser
 function mulberry32(seed) {
@@ -46,8 +49,8 @@ export function fitGBM(prices) {
     returns.reduce((a, b) => a + (b - mean) ** 2, 0) / returns.length;
   const std = Math.sqrt(variance);
 
-  const mu = mean * 252; // annualised
-  const sigma = std * Math.sqrt(252); // annualised
+  const mu = mean * TRADING_DAYS; // annualised
+  const sigma = std * Math.sqrt(TRADING_DAYS); // annualised
 
   return { mu, sigma, lastPrice: prices[prices.length - 1] };
 }
@@ -64,8 +67,8 @@ export function forecastGBM(
 ) {
   const rng = mulberry32(seed);
   const forecastPeriod = horizon;
-  const dt = 1 / forecastPeriod;
-  const timeAxis = Array.from({ length: forecastPeriod + 1 }, (_, i) => i / forecastPeriod);
+  const dt = 1 / TRADING_DAYS;
+  const timeAxis = Array.from({ length: forecastPeriod + 1 }, (_, i) => i * dt);
 
   // paths[p][t] — each path has horizon+1 points, first is lastPrice
   const paths = [];
