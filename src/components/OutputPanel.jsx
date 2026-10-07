@@ -11,7 +11,7 @@ export default function OutputPanel({ metrics, forecastResult }) {
           Select a ticker and click "Train &amp; Forecast" to begin
         </h3>
         <p style={{ color: "var(--text-secondary)", marginTop: 8, fontSize: "0.9rem" }}>
-          All models run directly in your browser — no backend server needed.
+          All models run directly in your browser.
         </p>
       </div>
     );

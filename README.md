@@ -2,7 +2,9 @@
 
 > **Teaching exemplar.** Built by the author, working with AI co-authoring agents, as an exemplar for a secondary-school research course. No student contributed to this code. Catalogued by Null Design as ND-006.
 
-A client-side stock price forecasting app built with React. All models run **100% in the browser** — no backend server, no data leaves your machine.
+A stock price forecasting app built with React. All models train and run **in the browser**. The only server code is one small function that relays daily price history.
+
+**Live:** https://stock-forecast-hazel.vercel.app
 
 ## Models
 
@@ -25,10 +27,14 @@ A **Naive** baseline — the last known price carried forward unchanged — is s
 
 ## Data
 
-Stock data is fetched client-side via:
+Daily prices load without an API key through `/api/prices`, a server function in [`api/prices.js`](api/prices.js). The price sources do not allow requests from a browser, so the function fetches them server-side and returns one normalised series. It tries, in order:
 
-- **Alpha Vantage** (recommended) — provide a free API key for reliable, CORS-enabled data
-- **Yahoo Finance** via CORS proxies — fallback, no API key required (may be rate-limited)
+- **Yahoo Finance** — dividend- and split-adjusted closes
+- **NASDAQ** — used when Yahoo has no answer; closes are not dividend-adjusted
+
+The activity log shows which source supplied the data. Only the ticker and date range are sent to the server; training and forecasting stay in the browser.
+
+Optionally, enter a free **Alpha Vantage** API key to fetch directly from the browser instead. On a static host with no server function, the app falls back to public CORS proxies, which are unreliable.
 
 Data is split into train / validation / test (80 / 10 / 10) with no look-ahead bias.
 
@@ -50,6 +56,8 @@ npm run dev
 
 Then open [http://localhost:5173](http://localhost:5173).
 
+`npm run dev` serves the front end only. To run the `/api/prices` function locally as well, use `npx vercel dev`.
+
 ## Build
 
 ```bash
@@ -57,8 +65,15 @@ npm run build   # outputs to /build
 npm run preview # preview the production build
 ```
 
-The build uses relative asset paths (`base: "./"`) so it deploys cleanly to GitHub Pages or any static host.
+The build uses relative asset paths (`base: "./"`), so it works at a domain root or under a sub-path.
 
 ## Deployment
 
-The app is configured for GitHub Pages. Push the `/build` directory contents to the `gh-pages` branch (or configure Pages to serve from `/build` on `main`).
+The app is hosted on [Vercel](https://vercel.com) (project `stock-forecast`), configured by [`vercel.json`](vercel.json): Vercel builds the Vite app into `/build` and deploys `api/prices.js` as a function.
+
+```bash
+npx vercel          # preview deployment
+npx vercel --prod   # production
+```
+
+A GitHub Pages copy is still published from `main` by `.github/workflows/deploy-pages.yml`. Pages is a static host, so that copy has no `/api/prices` and needs an Alpha Vantage key to load data.
