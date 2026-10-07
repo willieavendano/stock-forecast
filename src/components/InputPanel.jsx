@@ -72,7 +72,7 @@ export default function InputPanel({ onRun, loading, progress }) {
       <label>
         Alpha Vantage API Key
         <span style={{ fontSize: "0.75rem", color: "var(--text-secondary)", marginLeft: 6 }}>
-          (free at{" "}
+          (optional — free at{" "}
           <a
             href="https://www.alphavantage.co/support/#api-key"
             target="_blank"
@@ -86,17 +86,10 @@ export default function InputPanel({ onRun, loading, progress }) {
       </label>
       <input
         type="text"
-        placeholder="Paste your free API key here"
+        placeholder="Leave blank to use the built-in price source"
         value={apiKey}
         onChange={(e) => handleApiKeyChange(e.target.value)}
-        style={!apiKey.trim() ? { borderColor: "var(--warning)" } : {}}
       />
-      {!apiKey.trim() && (
-        <p style={{ fontSize: "0.75rem", color: "var(--warning)", marginTop: 4 }}>
-          Without an API key, data fetching may fail on hosted sites.
-          Get a free key in seconds — no credit card required.
-        </p>
-      )}
 
       <label>Ticker (preset)</label>
       <select value={ticker} onChange={(e) => { setTicker(e.target.value); setCustomTicker(""); }}>

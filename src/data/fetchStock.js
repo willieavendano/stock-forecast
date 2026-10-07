@@ -3,13 +3,17 @@
  *
  * Data source priority:
  *   1. Alpha Vantage (CORS-enabled, works directly from browser)
- *      — requires a free API key from alphavantage.co
- *   2. Yahoo Finance via CORS proxies (fallback, unreliable)
- *   3. Direct Yahoo fetch (localhost only)
+ *      — only when the user supplies a free API key from alphavantage.co
+ *   2. /api/prices — this app's own server function, which relays price
+ *      history from sources that do not allow browser requests
+ *   3. Yahoo Finance direct and via public CORS proxies (last resort, for
+ *      hosts with no server function; unreliable)
  *
  * Alpha Vantage free tier: 25 requests/day. Results are cached per
  * session so repeated fetches for the same ticker don't consume quota.
  */
+
+import { parseYahooChart, parseStooqCsv, parseNasdaqJson } from "./parsers";
 
 // ─── session cache ───────────────────────────────────────
 
@@ -74,7 +78,22 @@ async function fetchAlphaVantage(ticker, startDate, endDate, apiKey) {
   return { dates, prices, volumes, highs, lows, opens };
 }
 
-// ─── Free fallback (no API key) ──────────────────────────
+// ─── Price proxy (no API key) ────────────────────────────
+
+async function fetchProxy(ticker, startDate, endDate) {
+  const url =
+    `${import.meta.env.BASE_URL}api/prices?ticker=${encodeURIComponent(ticker)}` +
+    `&start=${startDate}&end=${endDate}`;
+
+  const resp = await fetchWithTimeout(url, 25000);
+  // A static host answers this path with an HTML page, which parses to null
+  const json = tryParseJson(await bodyText(resp));
+  if (!resp.ok) throw new Error(json?.error ?? `price proxy: HTTP ${resp.status}`);
+  if (!json?.prices?.length) throw new Error("price proxy: not available on this host");
+  return json;
+}
+
+// ─── Free fallback (no API key, no proxy) ────────────────
 //
 // Races four approaches in parallel — first success wins:
 //   1. Yahoo Finance chart API direct (query1 + query2) — works when Yahoo
@@ -127,103 +146,9 @@ function fetchWithTimeout(url, ms = 15000) {
   return fetch(url, { signal: ctrl.signal }).finally(() => clearTimeout(timer));
 }
 
-// ─── parsers ─────────────────────────────────────────────
-
-function parseYahooChart(json, ticker) {
-  const chart = json.chart.result[0];
-  const ts = chart.timestamp;
-  const q = chart.indicators?.quote?.[0] || {};
-  const adj = chart.indicators?.adjclose?.[0]?.adjclose;
-  if (!ts || !q.close) throw new Error(`Incomplete Yahoo chart data for "${ticker}".`);
-
-  const dates = [], prices = [], volumes = [], highs = [], lows = [], opens = [];
-  for (let i = 0; i < ts.length; i++) {
-    const p = adj?.[i] ?? q.close[i];
-    if (p == null || isNaN(p)) continue;
-    dates.push(new Date(ts[i] * 1000).toISOString().split("T")[0]);
-    prices.push(p);
-    volumes.push(q.volume?.[i] ?? 0);
-    highs.push(q.high?.[i] ?? p);
-    lows.push(q.low?.[i] ?? p);
-    opens.push(q.open?.[i] ?? p);
-  }
-  if (!prices.length) throw new Error(`No price rows for "${ticker}".`);
-  return { dates, prices, volumes, highs, lows, opens };
-}
-
-function parseStooqCsv(csv, ticker) {
-  const lines = csv.trim().split("\n");
-  if (lines.length < 2) throw new Error(`Empty Stooq CSV for "${ticker}".`);
-
-  const hdr = lines[0].split(",").map((h) => h.trim().toLowerCase());
-  const ci = (n) => hdr.indexOf(n);
-  const dateI = ci("date"), closeI = ci("close");
-  const openI = ci("open"), highI = ci("high"), lowI = ci("low"), volI = ci("volume");
-
-  if (dateI < 0 || closeI < 0)
-    throw new Error(`Unexpected Stooq columns for "${ticker}": ${hdr.join(",")}`);
-
-  const dates = [], prices = [], volumes = [], highs = [], lows = [], opens = [];
-  for (let i = 1; i < lines.length; i++) {
-    const c = lines[i].split(",");
-    const p = parseFloat(c[closeI]);
-    if (isNaN(p) || !c[dateI]) continue;
-    dates.push(c[dateI].trim());
-    prices.push(p);
-    volumes.push(volI >= 0 ? (parseInt(c[volI], 10) || 0) : 0);
-    highs.push(highI >= 0 ? (parseFloat(c[highI]) || p) : p);
-    lows.push(lowI >= 0 ? (parseFloat(c[lowI]) || p) : p);
-    opens.push(openI >= 0 ? (parseFloat(c[openI]) || p) : p);
-  }
-  if (!prices.length) throw new Error(`No valid rows in Stooq CSV for "${ticker}".`);
-
-  if (dates.length > 1 && dates[0] > dates[dates.length - 1]) {
-    dates.reverse(); prices.reverse(); volumes.reverse();
-    highs.reverse(); lows.reverse(); opens.reverse();
-  }
-  return { dates, prices, volumes, highs, lows, opens };
-}
-
-function parseNasdaqJson(json, ticker) {
-  const rows = json?.data?.tradesTable?.rows;
-  if (!rows?.length) throw new Error(`No NASDAQ rows for "${ticker}".`);
-
-  const clean = (s) => parseFloat((s ?? "").replace(/[$,]/g, ""));
-  const cleanVol = (s) => parseInt((s ?? "").replace(/,/g, ""), 10) || 0;
-
-  // MM/DD/YYYY → YYYY-MM-DD
-  const fmtDate = (s) => {
-    const p = (s ?? "").split("/");
-    return p.length === 3
-      ? `${p[2]}-${p[0].padStart(2, "0")}-${p[1].padStart(2, "0")}`
-      : null;
-  };
-
-  const dates = [], prices = [], volumes = [], highs = [], lows = [], opens = [];
-  for (const row of rows) {
-    const date = fmtDate(row.date);
-    const p = clean(row.close);
-    if (!date || isNaN(p)) continue;
-    dates.push(date);
-    prices.push(p);
-    volumes.push(cleanVol(row.volume));
-    highs.push(clean(row.high) || p);
-    lows.push(clean(row.low) || p);
-    opens.push(clean(row.open) || p);
-  }
-  if (!prices.length) throw new Error(`No valid NASDAQ rows for "${ticker}".`);
-
-  // NASDAQ returns newest-first
-  if (dates.length > 1 && dates[0] > dates[dates.length - 1]) {
-    dates.reverse(); prices.reverse(); volumes.reverse();
-    highs.reverse(); lows.reverse(); opens.reverse();
-  }
-  return { dates, prices, volumes, highs, lows, opens };
-}
-
 // ─── fallback fetch (no API key) ─────────────────────────
 
-async function fetchFallback(ticker, startDate, endDate) {
+async function fetchFallback(ticker, startDate, endDate, proxyError) {
   const p1 = Math.floor(new Date(startDate).getTime() / 1000);
   const p2 = Math.floor(new Date(endDate).getTime() / 1000);
   const d1 = startDate.replace(/-/g, "");
@@ -290,7 +215,7 @@ async function fetchFallback(ticker, startDate, endDate) {
   try {
     return await Promise.any(attempts);
   } catch (agg) {
-    const details = (agg.errors ?? []).map((e) => `  • ${e.message}`).join("\n");
+    const details = [proxyError, ...(agg.errors ?? [])].map((e) => `  • ${e.message}`).join("\n");
     throw new Error(
       `All data sources failed for "${ticker}".\n\n` +
       `Fix: enter a free Alpha Vantage API key in the API Key field above.\n` +
@@ -303,8 +228,9 @@ async function fetchFallback(ticker, startDate, endDate) {
 // ─── main export ─────────────────────────────────────────
 
 /**
- * Fetch stock data. Uses Alpha Vantage if apiKey is provided,
- * falls back to a parallel race of Yahoo direct + Stooq proxies.
+ * Fetch stock data. Uses Alpha Vantage if apiKey is provided, then this
+ * app's /api/prices function, then a parallel race of public sources.
+ * The result carries a `source` name when the price proxy supplied it.
  */
 export async function fetchStockData(ticker, startDate, endDate, apiKey) {
   const key = cacheKey(ticker, startDate, endDate);
@@ -317,12 +243,23 @@ export async function fetchStockData(ticker, startDate, endDate, apiKey) {
       _cache[key] = result;
       return result;
     } catch (avErr) {
-      console.warn("Alpha Vantage failed, trying free fallback:", avErr.message);
+      console.warn("Alpha Vantage failed, trying the price proxy:", avErr.message);
     }
   }
 
-  // Strategy 2: Yahoo direct + Stooq via proxies (parallel race)
-  const result = await fetchFallback(ticker, startDate, endDate);
+  // Strategy 2: this app's own price proxy
+  let proxyError;
+  try {
+    const result = await fetchProxy(ticker, startDate, endDate);
+    _cache[key] = result;
+    return result;
+  } catch (err) {
+    proxyError = err;
+    console.warn("Price proxy failed, trying public sources:", err.message);
+  }
+
+  // Strategy 3: Yahoo direct + Stooq via proxies (parallel race)
+  const result = await fetchFallback(ticker, startDate, endDate, proxyError);
   _cache[key] = result;
   return result;
 }

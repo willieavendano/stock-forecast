@@ -56,10 +56,10 @@ export default function App() {
         if (params.apiKey) {
           log("Using Alpha Vantage (CORS-enabled).");
         } else {
-          log("No API key — trying Yahoo direct + Stooq proxies (may fail)...", "info");
+          log("No API key — loading through the price proxy...", "info");
         }
         const stock = await fetchStockData(params.ticker, params.startDate, params.endDate, params.apiKey);
-        log(`Got ${stock.prices.length} trading days.`, "success");
+        log(`Got ${stock.prices.length} trading days${stock.source ? ` (source: ${stock.source})` : ""}.`, "success");
 
         if (stock.prices.length < params.lookback + FORECAST_HORIZON + 50) {
           throw new Error(
@@ -218,7 +218,7 @@ export default function App() {
           Ahead
         </p>
         <p style={{ fontSize: "0.8rem", color: "var(--text-secondary)", marginTop: 4 }}>
-          100% client-side — all models run in your browser. No server required.
+          All models train and run in your browser. The server only relays price history.
         </p>
       </header>
 
